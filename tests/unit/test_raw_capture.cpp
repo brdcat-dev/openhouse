@@ -2,17 +2,29 @@
 #include <filesystem>
 #include <stdexcept>
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 #include "raw_capture.hpp"
 
 namespace {
 struct TemporaryFile {
+#ifdef _WIN32
+  char path[MAX_PATH]{};
+  TemporaryFile() {
+    if (!GetTempFileNameA(std::filesystem::temp_directory_path().string().c_str(), "lh", 0, path))
+      throw std::runtime_error("GetTempFileName failed");
+  }
+#else
   char path[64] = "/tmp/lh-capture-test-XXXXXX";
   TemporaryFile() {
     const int fd = mkstemp(path);
     if (fd < 0) throw std::runtime_error("mkstemp failed");
     close(fd);
   }
+#endif
   ~TemporaryFile() { std::error_code error; std::filesystem::remove(path, error); }
 };
 

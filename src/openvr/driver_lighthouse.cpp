@@ -192,6 +192,8 @@ struct DeviceStatic {
   std::string baseChannel;  // base stations: "A" "b" "c", lhbs multi "1".."4"
   lh::ControllerType controllerType = lh::ControllerType::Index;
   bool lh2 = false;         // base stations: a 2.0 one
+  uint8_t baseHardwareVersion = 0;
+  uint16_t baseNonce = 0;
 };
 
 class Device : public ITrackedDeviceServerDriver {
@@ -273,6 +275,19 @@ class Device : public ITrackedDeviceServerDriver {
     if (lh2 == info_.lh2) return;
     info_.lh2 = lh2;
     if (active_) BaseLook(container_);
+  }
+  void SetBaseMetadata(uint8_t hardwareVersion, uint16_t nonce) {
+    if (hardwareVersion == info_.baseHardwareVersion && nonce == info_.baseNonce) return;
+    info_.baseHardwareVersion = hardwareVersion;
+    info_.baseNonce = nonce;
+    if (active_) BaseMetadata(container_);
+  }
+  void BaseMetadata(PropertyContainerHandle_t c) {
+    // Stock hardware IDs identify base stations with device family 9 in bits 24+.
+    if (info_.baseHardwareVersion)
+      VRProperties()->SetUint64Property(c, Prop_HardwareRevision_Uint64,
+                                       uint64_t(9) << 24 | info_.baseHardwareVersion);
+    VRProperties()->SetInt32Property(c, Prop_Nonce_Int32, info_.baseNonce);
   }
   void BaseLook(PropertyContainerHandle_t c) {
     auto* props = VRProperties();
@@ -505,6 +520,7 @@ class Device : public ITrackedDeviceServerDriver {
       }
       case lh::DeviceRole::BaseStation: {
         BaseLook(c);
+        BaseMetadata(c);
         props->SetStringProperty(c, Prop_ResourceRoot_String, "htc");
         props->SetStringProperty(c, Prop_ModeLabel_String, info_.baseChannel.c_str());
         props->SetInt32Property(c, Prop_DeviceClass_Int32, TrackedDeviceClass_TrackingReference);
@@ -1088,6 +1104,7 @@ class Provider : public IServerTrackedDeviceProvider {
       if (const auto found = devices_.find(b.serial); found != devices_.end()) {
         if (!b.channel.empty()) found->second->SetChannel(b.channel);
         found->second->SetLh2(b.lh2);
+        found->second->SetBaseMetadata(b.hardwareVersion, b.nonce);
         continue;
       }
       if (!b.seen) continue;
@@ -1096,6 +1113,8 @@ class Provider : public IServerTrackedDeviceProvider {
       info.role = lh::DeviceRole::BaseStation;
       info.baseChannel = b.channel;
       info.lh2 = b.lh2;
+      info.baseHardwareVersion = b.hardwareVersion;
+      info.baseNonce = b.nonce;
       Add(info, TrackedDeviceClass_TrackingReference);
     }
   }

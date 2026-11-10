@@ -3,9 +3,10 @@
 param(
     [ValidateSet('Install', 'Uninstall', 'Restore', 'Status')][string]$Action = 'Install',
     [string]$SteamVRPath = '',
-    [string]$DriverPath = (Join-Path $PSScriptRoot 'driver_lighthouse.dll')
+    [string]$DriverPath = ''
 )
 $ErrorActionPreference = 'Stop'
+if (-not $DriverPath) { $DriverPath = Join-Path $PSScriptRoot 'driver_lighthouse.dll' }
 if ($Action -eq 'Restore') { $Action = 'Uninstall' }
 if (-not $SteamVRPath) {
     $pathsFile = Join-Path $env:LOCALAPPDATA 'openvr\openvrpaths.vrpath'
@@ -96,6 +97,12 @@ function Remove-Schema {
 }
 
 if ($Action -eq 'Uninstall') {
+    $bluetoothScript = Join-Path $PSScriptRoot 'openhouse-bluetooth.ps1'
+    $bluetoothTarget = Join-Path $SteamVRPath 'bin\win64\nrfserlib.dll'
+    if ((Test-Path -LiteralPath $bluetoothScript) -and (Test-Path -LiteralPath $bluetoothTarget) -and
+        [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($bluetoothTarget)).Contains('openhouse Bluetooth: ')) {
+        & $bluetoothScript -Action Restore -SteamVRPath $SteamVRPath
+    }
     # First, so the check goes even when there's no driver backup.
     Remove-Schema
     Set-CheckRegistration $false
@@ -115,6 +122,11 @@ if ($Action -eq 'Install') {
         throw "The installed driver is already openhouse's and there is no stock backup ($backup). Verify SteamVR's files in Steam, then install again."
     }
     $source = $DriverPath
+    $bluetoothScript = Join-Path $PSScriptRoot 'openhouse-bluetooth.ps1'
+    $bluetoothBridge = Join-Path $PSScriptRoot 'bluetooth\nrfserlib.dll'
+    if ((Test-Path -LiteralPath $bluetoothScript) -and (Test-Path -LiteralPath $bluetoothBridge)) {
+        & $bluetoothScript -Action Apply -SteamVRPath $SteamVRPath -BridgePath $bluetoothBridge
+    }
 } else {
     if (-not (Test-Path $backup)) { throw "SteamVR's driver backup isn't there ($backup). Nothing to undo, or verify SteamVR's files in Steam." }
     Move-Item -LiteralPath $backup -Destination $target -Force

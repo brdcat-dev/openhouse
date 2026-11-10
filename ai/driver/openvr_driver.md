@@ -200,6 +200,8 @@ per-device `EnterStandby` callback queues `Session::PowerOff` and the stock rece
 command `ff 9f 04 6f 66 66 21` (`off!`, padded to 64 bytes). This is hardware power-off,
 not persistent disabling. HMDs and base stations do not advertise this capability.
 Global provider standby is deliberately not wired to power off every device.
+Windows base-station power management keeps SteamVR's native UI/settings, uses PC
+Bluetooth batches when available, and retains the Index fallback; see `bluetooth.md`.
 Power requests take priority over pending vibration for that receiver.
 The packet is decompilation-backed (`0x3ce5a0`, `0x3ce6e0`); callback routing and
 packet bytes are tested, but actual power-down/reconnect needs a live-device check.

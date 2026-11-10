@@ -8,17 +8,29 @@
 #include "openvr/host_frame.hpp"
 #include "openvr/haptic_routing.hpp"
 #include "openvr/telemetry_server.hpp"
+#include "openvr/stock_hmd.hpp"
 #include "common/net.hpp"
 #include "lh/log_level.hpp"
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <thread>
-#include <unistd.h>
+#include "platform/platform.hpp"
 #include "transport/usb/haptics.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+
+TEST(StockHmd, SharesOnlyTheHeadsetsBluetoothRadios) {
+  using lh::openvr::StockWindowsDeviceAllowed;
+  EXPECT_TRUE(StockWindowsDeviceAllowed(0x28de, 0x2102, false, true));
+  EXPECT_FALSE(StockWindowsDeviceAllowed(0x28de, 0x2102, false, false));
+  EXPECT_FALSE(StockWindowsDeviceAllowed(0x28de, 0x2101, false, true));
+  EXPECT_FALSE(StockWindowsDeviceAllowed(0x28de, 0x2300, false, true));
+  EXPECT_TRUE(StockWindowsDeviceAllowed(0x28de, 0x2300, true, false));
+  EXPECT_TRUE(StockWindowsDeviceAllowed(0x28de, 0x2000, false, false));
+  EXPECT_TRUE(StockWindowsDeviceAllowed(0x1234, 0x2102, false, false));
+}
 
 TEST(Haptics, MatchesStockEncoding) {
   // Captured from stock on SteamVR Identify (duration 0, 200 Hz, amplitude 0.125):
@@ -210,7 +222,7 @@ TEST(Skeleton, ThumbFollowsWhatItTouchesSmoothly) {
 // base since moved: 40 deg off); our room is level (RoomMap::LevelOrigin). The host frame
 // keeps SteamVR's origin and yaw but comes out level.
 TEST(RawAlignment, TakesTheLevelFromOurRoomNotAStaleDatabase) {
-  const auto path = (std::filesystem::temp_directory_path() / ("lh-test-rawalign-" + std::to_string(::getpid()) + ".json")).string();
+  const auto path = (std::filesystem::temp_directory_path() / ("lh-test-rawalign-" + std::to_string(lh::platform::ProcessId()) + ".json")).string();
   {
     std::ofstream f(path);
     f << R"({"known_universes": [{"id": "77", "tilt": {"pitch": 0.698, "roll": 0.0},
@@ -244,7 +256,7 @@ TEST(RawAlignment, TakesTheLevelFromOurRoomNotAStaleDatabase) {
 // aligning that frame (some reset past a few degrees) see no move. Our room turning
 // inside (re-levelling) changes nothing in the host frame either.
 TEST(RawAlignment, KeepsSteamVRsFrameForSmallLevelDifferencesAndNeverDrifts) {
-  const auto path = (std::filesystem::temp_directory_path() / ("lh-test-rawalign2-" + std::to_string(::getpid()) + ".json")).string();
+  const auto path = (std::filesystem::temp_directory_path() / ("lh-test-rawalign2-" + std::to_string(lh::platform::ProcessId()) + ".json")).string();
   {
     std::ofstream f(path);
     f << R"({"known_universes": [{"id": "77", "tilt": {"pitch": 0.035, "roll": 0.0},
@@ -429,7 +441,7 @@ TEST(Skeleton, ThumbReleasesAndGlidesBetweenButtons) {
 
 TEST(Telemetry, ServesHelloBacklogStateAndLogsOnLoopback) {
   lh::openvr::TelemetryServer server;
-  const int port = 36840 + 100 + int(::getpid() % 500);
+  const int port = 36840 + 100 + int(lh::platform::ProcessId() % 500);
   std::string error;
   ASSERT_TRUE(server.Start(port, "test-host", &error)) << error;
   server.Log(1.0, lh::LogLevel::Warn, "LHR-1", "before the client");

@@ -123,6 +123,11 @@ Released as openhouse 1.0. Recent work, all in the tree:
   zip, `lh/bug_report.hpp`), Reset room. Only toggles/sliders/selects exist there; one-shot
   actions are toggles the driver turns back off.
 * Base stations show the 2.0 or 1.0 model and icons from how they're tracked.
+* Windows base-station power management keeps SteamVR's UI/settings, prefers PC
+  Bluetooth for concurrent LH2 commands and state verification, and falls back to
+  the Index radio. The MSVC build adds a separate version-checked Bluetooth bridge.
+  Container filtering preserves external receiver isolation; OOTX revision/nonce
+  properties enable management. Build/install/evidence: `driver/bluetooth.md`.
 * Preinit devices (`~/.config/lh/preinit`) are reported connected-but-uninitialized until
   they first connect (Monado only takes devices at startup).
 * The pairing mailbox logs every request and reply (`pairing:` lines in vrserver.txt).

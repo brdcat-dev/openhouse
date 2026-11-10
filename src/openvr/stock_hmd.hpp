@@ -30,6 +30,15 @@
 
 namespace lh::openvr {
 
+// Only the headset's own radios may be shared with the stock Bluetooth service.
+inline bool StockWindowsDeviceAllowed(unsigned vid, unsigned pid, bool headset, bool headsetRadio) {
+  if (vid != 0x28de) return true;
+  if (pid == 0x2101) return false;
+  if (pid == 0x2102) return headsetRadio;
+  if (pid == 0x2300) return headset;
+  return true;
+}
+
 class StockHmd {
  public:
   using LogFn = std::function<void(const std::string&)>;

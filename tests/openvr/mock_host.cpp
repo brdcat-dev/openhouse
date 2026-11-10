@@ -362,6 +362,11 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(PropValue<uint64_t>(d, Prop_CurrentUniverseId_Uint64, 0)),
                 PropValue<float>(d, Prop_DeviceBatteryPercentage_Float, -1));
     CHECK(d.cls != TrackedDeviceClass_HMD, "HMDs must not be exposed");
+    if (d.cls == TrackedDeviceClass_TrackingReference) {
+      const auto hardware = PropValue<uint64_t>(d, Prop_HardwareRevision_Uint64, 0);
+      CHECK(hardware >> 24 == 9 && (hardware & 0xff) != 0, "base station hardware revision for Bluetooth");
+      CHECK(d.props.count(Prop_Nonce_Int32), "base station power-management nonce");
+    }
     if (d.cls == TrackedDeviceClass_Controller) controller = &d;
   }
   CHECK(controller != nullptr, "the Index controller must be registered");

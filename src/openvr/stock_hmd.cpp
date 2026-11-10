@@ -19,6 +19,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <setupapi.h>
+#include <devpkey.h>
 extern "C" {
 #include <hidsdi.h>
 }
@@ -179,6 +180,15 @@ using InterfaceDetailA = BOOL(WINAPI*)(HDEVINFO, PSP_DEVICE_INTERFACE_DATA, PSP_
                                        PDWORD, PSP_DEVINFO_DATA);
 EnumInterfaces g_realEnum = nullptr;
 InterfaceDetailA g_realDetail = nullptr;
+std::vector<GUID> g_headsetContainers;
+
+bool ContainerOf(HDEVINFO set, SP_DEVINFO_DATA* device, GUID* container) {
+  DEVPROPTYPE type = 0;
+  const GUID none{};
+  return SetupDiGetDevicePropertyW(set, device, &DEVPKEY_Device_ContainerId, &type,
+                                 reinterpret_cast<BYTE*>(container), sizeof(*container), nullptr, 0) &&
+         type == DEVPROP_TYPE_GUID && !IsEqualGUID(*container, none);
+}
 
 unsigned HexAfter(const std::string& path, const char* key) {
   const auto at = path.find(key);
@@ -198,20 +208,47 @@ std::string SerialOf(const char* path) {
   return Upper(out);
 }
 
-bool StockMayUse(const char* devicePath) {
+void FindHeadsetContainers() {
+  g_headsetContainers.clear();
+  const HDEVINFO set = SetupDiGetClassDevsA(nullptr, "USB", nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+  if (set == INVALID_HANDLE_VALUE) return;
+  SP_DEVINFO_DATA device{};
+  device.cbSize = sizeof device;
+  for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &device); ++i) {
+    char instance[512]{};
+    if (!SetupDiGetDeviceInstanceIdA(set, &device, instance, sizeof instance, nullptr)) continue;
+    const std::string path = Upper(instance);
+    if (HexAfter(path, "VID_") != 0x28de) continue;
+    const unsigned pid = HexAfter(path, "PID_");
+    bool headset = pid == 0x2000 || pid == 0x2012 || pid == 0x2022;
+    if (pid == 0x2300) {
+      std::lock_guard lock(g_openMutex);
+      const auto slash = path.find_last_of('\\');
+      headset = g_allowedHeadsets.count("*") ||
+                (slash != std::string::npos && g_allowedHeadsets.count(path.substr(slash + 1)));
+    }
+    GUID container{};
+    if (headset && ContainerOf(set, &device, &container)) g_headsetContainers.push_back(container);
+  }
+  SetupDiDestroyDeviceInfoList(set);
+}
+
+bool StockMayUse(const char* devicePath, HDEVINFO set, SP_DEVINFO_DATA* device) {
   if (!devicePath) return true;
   const std::string path = Upper(devicePath);
   if (HexAfter(path, "VID_") != 0x28de) return true;
   const unsigned pid = HexAfter(path, "PID_");
-  if (pid == 0x2101 || pid == 0x2102) return false;  // dongles: ours only
-  if (pid != 0x2300) return true;
-  {
-    std::lock_guard lock(g_openMutex);
-    if (g_allowedHeadsets.count("*")) return true;
+  bool headsetRadio = false;
+  if (pid == 0x2102) {
+    GUID container{};
+    if (ContainerOf(set, device, &container))
+      headsetRadio = std::any_of(g_headsetContainers.begin(), g_headsetContainers.end(),
+                                [&](const GUID& hmd) { return IsEqualGUID(container, hmd) != 0; });
   }
-  const std::string serial = SerialOf(devicePath);
+  const std::string serial = pid == 0x2300 ? SerialOf(devicePath) : "";
   std::lock_guard lock(g_openMutex);
-  return g_allowedHeadsets.count(serial) > 0;
+  return StockWindowsDeviceAllowed(0x28de, pid, g_allowedHeadsets.count("*") || g_allowedHeadsets.count(serial),
+                                   headsetRadio);
 }
 
 // Whether interface `index` of the set is hidden; reads its path with the real detail call.
@@ -222,8 +259,10 @@ bool HiddenInterface(HDEVINFO set, PSP_DEVICE_INTERFACE_DATA data) {
   alignas(8) char buffer[4096];
   auto* detail = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_A>(buffer);
   detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
-  if (!g_realDetail(set, data, detail, size, nullptr, nullptr)) return false;
-  if (StockMayUse(detail->DevicePath)) return false;
+  SP_DEVINFO_DATA device{};
+  device.cbSize = sizeof device;
+  if (!g_realDetail(set, data, detail, size, nullptr, &device)) return false;
+  if (StockMayUse(detail->DevicePath, set, &device)) return false;
   LogHidden(detail->DevicePath);
   return true;
 }
@@ -267,6 +306,7 @@ void* HookImport(HMODULE module, const char* dll, const char* name, void* hook) 
 }
 
 bool HideOtherDevices(HMODULE module) {
+  FindHeadsetContainers();
   g_realDetail = reinterpret_cast<InterfaceDetailA>(
       reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("setupapi.dll"), "SetupDiGetDeviceInterfaceDetailA")));
   if (!g_realDetail) return false;

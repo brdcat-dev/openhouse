@@ -79,7 +79,19 @@ SteamVR host room/chaperone files are never rewritten by our alignment code.
 
 ## Validation and limits
 
-**Verified under Wine with an isolated prefix, not native Windows:**
+Native Windows validation (2026-11-10): the MSVC Release build and all eight CTest
+suites pass. PC Bluetooth wake/sleep batches passed three native SteamVR cycles on
+four LH2 stations with independent state readback. See `bluetooth.md` for current
+Index fallback validation and exact installed hashes.
+
+The MSVC build also produces `bluetooth/nrfserlib.dll`, the PC Bluetooth bridge.
+`scripts/windows-bluetooth.ps1` (packaged as `openhouse-bluetooth.ps1`) installs/restores
+it, preserves SteamVR's original library, and prepares the Index fallback with the
+tested handshake correction. It refuses unknown library hashes and running SteamVR.
+Packages containing the bridge install it with the driver and restore it on uninstall.
+The MinGW cross-build does not currently build this C++/WinRT component.
+
+**Earlier MinGW build checks, under Wine with an isolated prefix:**
 
 * all 8 available Windows CTest suites pass (Linux original-binary oracle tests
   are intentionally excluded);

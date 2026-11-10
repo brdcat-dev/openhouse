@@ -143,6 +143,9 @@ if(LH_BUILD_USB)
     target_link_libraries(lhtool PRIVATE lh_usb lh_tracking lh)
     # Started by SteamVR each session: warns when an update replaced our driver.
     add_executable(openhouse-check WIN32 apps/openhouse-check/main.cpp)
+    if(MSVC)
+      target_link_options(openhouse-check PRIVATE /ENTRY:mainCRTStartup)
+    endif()
     add_executable(lhcapture apps/lhcapture/main.cpp)
     target_include_directories(lhcapture PRIVATE src)
     target_link_libraries(lhcapture PRIVATE lh_usb nlohmann_json::nlohmann_json)
@@ -261,11 +264,21 @@ if(LH_BUILD_VIEWER)
 endif()
 
 # ---- tests --------------------------------------------------------------------
+if(WIN32 AND MSVC AND LH_BUILD_OPENVR_DRIVER)
+  add_library(openhouse_bluetooth MODULE src/bluetooth/steamvr_bridge.cpp src/bluetooth/windows.cpp)
+  target_include_directories(openhouse_bluetooth PRIVATE src)
+  target_link_libraries(openhouse_bluetooth PRIVATE nlohmann_json::nlohmann_json windowsapp bcrypt)
+  set_target_properties(openhouse_bluetooth PROPERTIES PREFIX "" OUTPUT_NAME nrfserlib
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bluetooth
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bluetooth)
+endif()
+
 if(LH_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
   add_executable(lh_unit_tests
     tests/unit/test_platform.cpp
+    tests/unit/test_bluetooth.cpp
     tests/unit/test_tracking_source.cpp
     tests/unit/test_pose_solver.cpp
     tests/unit/test_tracker.cpp

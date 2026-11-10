@@ -1057,6 +1057,8 @@ SessionSnapshot SessionImpl::Snapshot() const {
     s.mode = b.dynamic.mode;
     // lhbs multi channels are its slot (1-4 on the display), stock ones A, b, c.
     s.lh2 = b.dynamic.sobChannel >= 0;
+    s.hardwareVersion = b.config.hardwareVersion;
+    s.nonce = b.dynamic.extra;
     if (b.dynamic.sobChannel >= 0) s.channel = std::to_string(b.dynamic.sobChannel + 1);  // LH2: 1-16
     else if (b.dynamic.multiSlot >= 0) s.channel = std::to_string(b.dynamic.multiSlot + 1);
     else if (b.dynamic.mode >= 1 && b.dynamic.mode <= 3) s.channel = std::string(1, "Abc"[b.dynamic.mode - 1]);

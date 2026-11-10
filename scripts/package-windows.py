@@ -18,14 +18,21 @@ shutil.rmtree(out, ignore_errors=True)
 (out / 'apps').mkdir(parents=True)
 files = {build / 'openvr/lighthouse/bin/win64/driver_lighthouse.dll': out / 'driver_lighthouse.dll'}
 files.update({build / name: out / 'apps' / name for name in ['liblh.dll', 'openhouse-viewer.exe', 'openhouse-compare.exe', 'lhviz.exe', 'lhtool.exe', 'lhcapture.exe', 'openhouse-check.exe']})
+bridge = build / 'bluetooth/nrfserlib.dll'
+if bridge.is_file():
+    (out / 'bluetooth').mkdir()
+    files[bridge] = out / 'bluetooth/nrfserlib.dll'
 system = {'advapi32.dll', 'kernel32.dll', 'shlwapi.dll', 'user32.dll', 'gdi32.dll',
           'shell32.dll', 'winmm.dll', 'ole32.dll', 'comdlg32.dll', 'msvcrt.dll',
-          'ucrtbase.dll', 'ntdll.dll', 'imm32.dll', 'version.dll', 'oleaut32.dll', 'setupapi.dll', 'opengl32.dll', 'hid.dll', 'ws2_32.dll'}
+          'ucrtbase.dll', 'ntdll.dll', 'imm32.dll', 'version.dll', 'oleaut32.dll', 'setupapi.dll', 'opengl32.dll', 'hid.dll', 'ws2_32.dll', 'bcrypt.dll'}
 artifacts = []
 for source, target in files.items():
     if not source.is_file():
         sys.exit(f'Missing build artifact: {source}')
-    subprocess.run(['x86_64-w64-mingw32-strip', '--strip-unneeded', '-o', str(target), str(source)], check=True)
+    if source == bridge:
+        shutil.copy2(source, target)
+    else:
+        subprocess.run(['x86_64-w64-mingw32-strip', '--strip-unneeded', '-o', str(target), str(source)], check=True)
     pe = subprocess.check_output(['x86_64-w64-mingw32-objdump', '-p', str(target)], text=True)
     imports = re.findall(r'DLL Name:\s*(\S+)', pe)
     for name in imports:
@@ -51,6 +58,7 @@ gpl = Path('/usr/share/licenses/spdx/GPL-3.0-only.txt')
 if gpl.is_file():
     shutil.copy2(gpl, licenses / 'GCC-GPL-3.0.txt')
 shutil.copy2(repo / 'scripts/windows-driver.ps1', out / 'openhouse-driver.ps1')
+shutil.copy2(repo / 'scripts/windows-bluetooth.ps1', out / 'openhouse-bluetooth.ps1')
 shutil.copy2(repo / 'packaging/settingsschema.vrsettings', out / 'settingsschema.vrsettings')
 for name, action in [('Install-Driver.bat', 'Install'), ('Uninstall-Driver.bat', 'Uninstall')]:
     (out / name).write_bytes(('@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0openhouse-driver.ps1" '
