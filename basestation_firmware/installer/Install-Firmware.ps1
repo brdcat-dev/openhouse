@@ -90,6 +90,23 @@ function Write-Image([byte[]]$bytes, [string]$drive) {
   }
 }
 
+Write-Host ""
+Write-Host "                                                                              " -BackgroundColor Red
+Write-Host "   !!!  WARNING: ONLY FOR LIGHTHOUSE 1.0 BASE STATIONS (HTC VIVE, 2016)  !!!   " -ForegroundColor White -BackgroundColor Red
+Write-Host "                                                                              " -BackgroundColor Red
+Write-Host ""
+Write-Host "  This firmware is ONLY for Lighthouse 1.0 base stations: the HTC ones that came" -ForegroundColor Yellow
+Write-Host "  with the original Vive (model 1.0, a mode button and channel letter on the back)." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  NEVER use it on a Lighthouse 2.0 base station (Valve Index / SteamVR Base" -ForegroundColor Yellow
+Write-Host "  Station 2.0, or HTC's Base Station 2.0). It will BRICK a 2.0 base station." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  If you're not sure which one you have, STOP and close this window." -ForegroundColor Yellow
+Write-Host ""
+$generation = Read-Host "Type 1.0 to confirm this is a Lighthouse 1.0 base station"
+if ($generation.Trim() -ne "1.0") { Write-Host "Stopped. Nothing was changed."; exit 0 }
+Write-Host ""
+
 Write-Host "lhbs base station firmware installer"
 Write-Host ""
 if ($Restore) {
@@ -102,6 +119,13 @@ Write-Host ""
 
 $drive = Wait-Drive
 Write-Host "Found the base station ($drive)."
+# A Lighthouse 1.0 base station's bootloader drive holds its whole 128 KiB flash.
+# Anything else isn't one: stop before reading or writing anything.
+$flash = Get-Item -LiteralPath "$drive\firmware.bin" -ErrorAction SilentlyContinue
+if (-not $flash -or $flash.Length -ne 131072) {
+  Eject $drive
+  Fail "this isn't a Lighthouse 1.0 base station (its firmware.bin isn't 128 KiB). Nothing was written."
+}
 
 $backup = ""
 if (-not $Restore) {

@@ -13,7 +13,7 @@ as optical slave of a stock master, and as master of a stock slave.
 | `src/`, `test/`, `Makefile` | The firmware rewrite. One module per stock source file; every function names the stock address it replaces |
 | `fw/` (local only) | `lhfw`, a minimal bring-up firmware (display, LEDs, button, EEPROM snapshot) |
 | `tools/` | `lpcsum.py` (the boot ROM's vector checksum, run by the Makefile) |
-| `installer/` | The flashing scripts shipped in the firmware package (backup, write in place, verify, restore) |
+| `installer/` | The flashing scripts shipped in the firmware package (a "Lighthouse 1.0 only" warning that needs `1.0` typed, a 128 KiB flash check, backup, write in place, verify, restore) |
 | `re/` (local only) | Analysis scripts (headless Ghidra, Unicorn RAM-init dump), function names, parameter table |
 | `patches/` (local only) | Byte patches for the stock image |
 

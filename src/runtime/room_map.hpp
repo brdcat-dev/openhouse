@@ -74,8 +74,9 @@ class RoomMap {
   const RoomBase* Base(uint32_t serial) const;
   std::vector<RoomBase> Bases() const;
   bool Empty() const;
-  // Locked: placed well (100+ keyframes, this session or saved), and not bumped. Only
-  // the base's own accelerometer (a bump) unlocks it; the light never moves it again.
+  // Locked: placed well (100+ keyframes, this session or saved), and not bumped. Only a
+  // bump unlocks it: its accelerometer, or room solves that keep placing it elsewhere
+  // (Session::LightMovedLockedBase). A single device's filter never moves it.
   static bool Locked(const RoomBase& base);
   const Room* Active() const { return active_ < 0 ? nullptr : &rooms_[size_t(active_)]; }
   uint64_t Revision() const { return revision_; }

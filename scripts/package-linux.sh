@@ -22,11 +22,22 @@ done
 cp "$repo/third_party/hidapi/LICENSE-bsd.txt" "$out/lh-licenses/hidapi.txt"
 cp "$repo/third_party/imgui/LICENSE.txt" "$out/lh-licenses/imgui.txt"
 for package in openvr glfw systemd; do
-  [[ -d /usr/share/licenses/$package ]] && cp -r "/usr/share/licenses/$package" "$out/lh-licenses/"
+  # -L: copies of what the notices link to (systemd's MIT-0.txt is a link into /usr/share/doc)
+  [[ -d /usr/share/licenses/$package ]] && { cp -rL "/usr/share/licenses/$package" "$out/lh-licenses/" 2>/dev/null || true; }
 done
+find "$out/lh-licenses" -xtype l -delete  # a link whose target wasn't there
+# lhtool and openhouse-compare use liblh, shipped next to them; no tool keeps the build
+# directory as its RUNPATH.
+cp -L "$build/liblh.so.1" "$out/tools/"
+strip --strip-unneeded "$out/tools/liblh.so.1"
 for tool in lhtool lhcapture openhouse-viewer openhouse-check openhouse-compare; do
   cp "$build/$tool" "$out/tools/"
   strip "$out/tools/$tool"
+  if readelf -d "$out/tools/$tool" | grep -q 'liblh\.so'; then
+    patchelf --set-rpath '$ORIGIN' "$out/tools/$tool"
+  else
+    patchelf --remove-rpath "$out/tools/$tool"
+  fi
 done
 tar czf "$repo/dist/openhouse-driver-linux.tar.gz" -C "$repo/dist" openhouse-driver
 echo "Packaged $repo/dist/openhouse-driver-linux.tar.gz"

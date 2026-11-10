@@ -71,6 +71,18 @@ class WirelessReportParser {
   ImuEmitter imu_;
   int version_ = 0;  // +0x128: 0 legacy, 1 Wv2
   Wv2Decoder wv2_;
+  // Not stock: a recording started mid-session (Record Session) has no transition
+  // packet, so every Wv2 packet went to the legacy decoder (#14: no IMU, a few hundred
+  // pulses in 100 s). While on legacy, packets are also tried as Wv2 on two probes (LH2
+  // and LH1 light); legacy failing where one decodes, again and again, is a Wv2 device.
+  Wv2Decoder probe_[2] = {MakeProbe(1), MakeProbe(0)};
+  int probeDecoded_[2] = {0, 0};
+  static Wv2Decoder MakeProbe(int opticalSub) {
+    Wv2Decoder d;
+    d.opticalSub = opticalSub;
+    d.controllerSub = 0;
+    return d;
+  }
   WirelessPacket pkt_;
 };
 

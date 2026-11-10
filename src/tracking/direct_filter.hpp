@@ -79,6 +79,11 @@ class DirectFilter {
   // their predicted spread are left out of the update (reflections, one bad sensor),
   // unless more than half of a sweep's rows are: then the prediction is what's off.
   double gateSigma = 0;
+  // How far the gravity state may sit from 9.80665 before the filter's calibration is
+  // rejected: stock 5 %. The improvements allow 10 %: an Index controller whose
+  // accelerometer reads 5 % low converged on 9.30 every time and reset over and over
+  // (GitHub report); the gravity state absorbs that scale, so tracking is fine there.
+  double gravityTolerance = 0.49033249999999996;
   uint64_t gatedRows = 0;
   int lastOutliers = 0;          // last Update: optical rows beyond gateSigma, before gating
   double lastWorstSigma = 0;     // last Update: largest |innovation| / predicted sigma
@@ -102,6 +107,13 @@ class DirectFilter {
   // Diagnostics: which limit refused the last frame, and how many sensor rows it had.
   int lastRejectReason = kRejectNone;
   int lastRejectRows = 0;
+  // When an alternate base's limit refused the frame: which slot (0..2, else -1), the
+  // size of the refused correction, and the limit it exceeded. Without the magnitude a log cannot tell a base that is 1.02 deg out
+  // (a limit worth loosening) from one that is 40 deg out (a pair that does not fit at
+  // all), and those want opposite fixes.
+  int lastRejectSlot = -1;
+  double lastRejectOver = 0;   // the refused correction: metres for position, radians for rotation
+  double lastRejectLimit = 0;  // the limit that was exceeded, same unit
 
   void DefaultState();                        // 0x3511a0 (state only)
   void InitialCovariance();                   // 0x350280 (diagonal only)

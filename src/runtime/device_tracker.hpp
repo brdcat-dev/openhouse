@@ -55,6 +55,14 @@ class DeviceTracker {
   // Whether the output carries the acceleration (hosts predict with it; settings.json
   // "acceleration").
   void SetReportAcceleration(bool on) { reportAcceleration_ = on; }
+  // Whether the output holds the pose while the device is physically still (on by
+  // default). Off for head-mounted displays: a head sitting still passes the stillness
+  // test most of the time, so the view froze to the head and caught up 0.1-0.65 deg
+  // whenever a small movement released it, every ~0.5-7 s (22.9 s of 30 s frozen).
+  void SetHoldStill(bool on) {
+    allowHold_ = on;
+    if (!on) heldPose_.reset();
+  }
   void SetSmoothing(double position, double rotation) {
     smoothPosition_ = std::max(0.0, position);
     smoothRotation_ = std::max(0.0, rotation);
@@ -146,6 +154,15 @@ class DeviceTracker {
   std::map<uint32_t, double> loosened_;  // alternate bases loosened for a relearn: since when
   uint32_t reacquireOn_ = 0;              // CheckHealth: the pose is wrong, start over on this base
   std::optional<std::pair<uint32_t, double>> avoidBase_;  // (base, until Now()): don't bootstrap on it
+  // Reacquire throttling (not stock). A reacquire throws the filter away and starts
+  // over, so one that begins on the base it just began on has gained nothing: the light
+  // it rejected is the light it bootstraps on again. Live report 2026-11-09 (5 x LH 2.0,
+  // 399 s): 1101 reacquires = 2.75/s, 129 of them onto the same base, one base pair
+  // cycling 345 times, 4 of 6 devices affected.
+  uint32_t lastReacquireOn_ = 0;           // base the last reacquire started over on
+  double lastReacquireAt_ = -1e300;        // Now() of that reacquire
+  double reacquireBlockedUntil_ = -1e300;  // Now() before which another is not even queued
+  int reacquireBurst_ = 0;                 // reacquires since the tracker last settled
   std::map<uint32_t, std::deque<std::pair<double, int>>> recentUsed_;  // (sync time, sensors) of used frames, 0.5 s
   std::optional<double> switchedAt_;
   double acquiredAt_ = 0;
@@ -164,6 +181,7 @@ class DeviceTracker {
   // next beam word, then frames are held to merge channels), which read as darkness.
   double lastOpticalTaken_ = -1e300, lastOpticalSeen_ = -1e300;
   bool holdStill_ = true, still_ = false, haveAccelMean_ = false;
+  bool allowHold_ = true;  // SetHoldStill
   Eigen::Vector3d accelMean_ = Eigen::Vector3d::Zero();
   std::optional<double> quietSince_;
   std::optional<Eigen::Isometry3d> heldPose_;

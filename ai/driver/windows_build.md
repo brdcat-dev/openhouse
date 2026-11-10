@@ -6,10 +6,13 @@
 
 * `build-win64/openvr/lighthouse/bin/win64/driver_lighthouse.dll`;
 * `apps/`: `liblh.dll`, `openhouse-viewer.exe`, `openhouse-compare.exe`, `lhviz.exe`,
-  `lhtool.exe`, `lhcapture.exe`, `openhouse-check.exe`;
+  `lhtool.exe`, `lhcapture.exe`, `openhouse-check.exe`; `openhouse-installer.exe` at the top;
 * `dist/openhouse-windows-x64.zip`: stripped binaries, `LICENSE.txt`, dependency notices
-  (`licenses/`), `BUILD.json` (hashes), the settings page schema, and the installer
-  (`Install-Driver.bat` / `Uninstall-Driver.bat` run `openhouse-driver.ps1`).
+  (`licenses/`), `BUILD.json` (hashes), the settings page schema, and the installer.
+
+Every Windows binary carries a `VERSIONINFO` resource and executables an `asInvoker`
+manifest (`cmake/windows/lh_windows_resources.cmake`): unsigned binaries without them
+score worse with Windows Defender, which flagged releases.
 
 The driver DLL is self-contained: Ceres, glog/gflags, hidapi, zlib and compiler
 runtimes are statically linked. PE import inspection checks that it needs only
@@ -51,15 +54,19 @@ python3 scripts/package-windows.py build-win64 "$VCPKG_ROOT/installed/x64-mingw-
 baseline, artifact hashes and PE imports. Do not mistake an artifact built from a
 dirty tree for that commit alone.
 
-## Windows installer (`scripts/windows-driver.ps1`)
+## Windows installer (`apps/openhouse-installer`)
 
-Shipped as `openhouse-driver.ps1` behind `Install-Driver.bat` / `Uninstall-Driver.bat`.
-It refuses to run while a host is running, keeps the stock DLL as
+A console exe (it replaced `Install-Driver.bat` running `powershell -ExecutionPolicy
+Bypass`, a dropper pattern Defender flagged). Without arguments it asks install or
+uninstall; `--install`, `--uninstall`, `--status`, `--steamvr PATH`, `--yes`. It offers
+to close Steam / SteamVR (they hold the DLL open), overwrites with retries, keeps the stock DLL as
 `driver_lighthouse.dll.stock` (needed for the headset display), verifies the installed
 hash, installs the settings page schema (an existing one is kept as `.stock`), and
 registers the update check (`openhouse-check.exe` in `%LOCALAPPDATA%\openhouse`,
 autolaunched overlay). SteamVR is found through OpenVR's runtime path file, then
-Steam's registry path; `-SteamVRPath` overrides. Uninstall reverses all of it.
+Steam's registry path; `--steamvr` overrides. Whenever the installed DLL lacks the
+marker `liblh session started` it is SteamVR's (a newer one after an update) and becomes
+the backup. Uninstall reverses all of it, but keeps a newer SteamVR DLL over an old backup.
 
 ## Platform handling
 
@@ -89,6 +96,8 @@ The MSVC build also produces `bluetooth/nrfserlib.dll`, the PC Bluetooth bridge.
 it, preserves SteamVR's original library, and prepares the Index fallback with the
 tested handshake correction. It refuses unknown library hashes and running SteamVR.
 Packages containing the bridge install it with the driver and restore it on uninstall.
+The native installer performs those steps directly, without launching PowerShell.
+Unknown SDK hashes are rejected on installation and preserved on uninstallation.
 The MinGW cross-build does not currently build this C++/WinRT component.
 
 **Earlier MinGW build checks, under Wine with an isolated prefix:**

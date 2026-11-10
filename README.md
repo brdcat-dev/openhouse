@@ -32,9 +32,9 @@ SteamVR updates could overwrite the driver. The installer also adds a small upda
 To see which version you have, open `openhouse-viewer` or look for `openhouse` in SteamVR's `vrserver.txt`.
 
 ### Windows
-Extract the zip somewhere and double click `Install-Driver.bat`. To go back to SteamVR's driver, double click `Uninstall-Driver.bat`.
+Extract the zip somewhere and double click `openhouse-installer.exe`, then pick 1 to install. To go back to SteamVR's driver, run it again and pick 2. If Steam or SteamVR is open, it asks to close them first.
 
-If your SteamVR is in another Steam library, run it from a command prompt like `Install-Driver.bat -SteamVRPath "D:\SteamLibrary\steamapps\common\SteamVR"`.
+If your SteamVR is in another Steam library, run it from a command prompt like `openhouse-installer.exe --install --steamvr "D:\SteamLibrary\steamapps\common\SteamVR"`.
 
 ### Linux
 ```sh

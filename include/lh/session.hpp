@@ -245,6 +245,12 @@ class Session {
   virtual std::vector<Receiver> Receivers() const = 0;
   // Pairing mode on a receiver for `seconds` (0 leaves it); false if not plugged in.
   virtual bool SetPairing(const std::string& receiver, double seconds) = 0;
+  // Live USB: the radio of the receiver with Bluetooth, for SteamVR's base station power
+  // management. Whether there is one, switching it (false if it failed) and reading it
+  // (nullopt if it didn't answer). The last two can block for a moment.
+  virtual bool HasBluetoothRadio() const = 0;
+  virtual bool SetBluetoothRadio(bool on) = 0;
+  virtual std::optional<bool> BluetoothRadioOn() = 0;
   // Live USB: starts recording every raw report to this .lhraw (replayable with
   // `lhtool session`), or stops with an empty path. False when there is nothing to record.
   virtual bool SetCapture(const std::string& path) = 0;

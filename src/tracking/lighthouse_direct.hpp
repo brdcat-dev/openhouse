@@ -27,6 +27,7 @@ class LighthouseDirect {
   // during violent motion (DirectFilter::holdSlowStates).
   void SetImprovements(bool multiStart, double gateSigma, bool swing = false) {
     multiStart_ = multiStart; filter_.gateSigma = gateSigma; swing_ = swing;
+    filter_.gravityTolerance = multiStart ? 0.98 : 0.49033249999999996;
   }
   void OnBaseConfig(const BaseConfig&, const BaseDynamicState&);
   void SetRecordedTilt(uint32_t serial, std::array<double, 2> tilt, double variance);

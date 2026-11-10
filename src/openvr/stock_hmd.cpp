@@ -355,6 +355,7 @@ class StockHmd::DeviceProxy : public ITrackedDeviceServerDriver {
   void EnterStandby() override { inner_->EnterStandby(); }
   void* GetComponent(const char* name) override { return inner_->GetComponent(name); }
   void DebugRequest(const char* request, char* response, uint32_t size) override {
+    if (owner_->requestHandler_ && owner_->requestHandler_(request, response, size)) return;
     inner_->DebugRequest(request, response, size);
   }
   DriverPose_t GetPose() override { return inner_->GetPose(); }
@@ -519,14 +520,65 @@ class StockHmd::LogFilter : public IVRDriverLog {
   std::map<std::string, std::chrono::steady_clock::time_point> seen_;
 };
 
+// The stock driver's own tracker (unused: ours drives the pose) writes its room's universe
+// onto the headset each time it acquires, so SteamVR switches to that universe's chaperone
+// (play area, standing and seated origins). Ours writes the universe only when its own
+// changes, so a stock tracker that lost its light and re-acquired mid-session left SteamVR
+// in the stock universe until the end (live: twice in five sessions, the two universes'
+// origins 15 cm / 1.2 deg apart seated, 32 cm / 12 deg standing). The universe is ours to
+// set: the stock driver's writes of it are dropped (reported as done); all else passes.
+class StockHmd::Properties : public IVRProperties {
+ public:
+  Properties(IVRProperties* real, StockHmd* owner) : real_(real), owner_(owner) {}
+  ETrackedPropertyError ReadPropertyBatch(PropertyContainerHandle_t c, PropertyRead_t* batch, uint32_t n) override {
+    return real_->ReadPropertyBatch(c, batch, n);
+  }
+  ETrackedPropertyError WritePropertyBatch(PropertyContainerHandle_t c, PropertyWrite_t* batch, uint32_t n) override {
+    std::vector<uint32_t> kept;
+    for (uint32_t i = 0; batch && i < n; ++i) {
+      if (batch[i].prop != Prop_CurrentUniverseId_Uint64) {
+        kept.push_back(i);
+        continue;
+      }
+      batch[i].eSetError = batch[i].eError = TrackedProp_Success;
+      if (!logged_.exchange(true) && owner_->log_)
+        owner_->log_("stock driver: its universe writes are dropped (ours sets the headset's universe)");
+    }
+    if (!batch || kept.size() == n) return real_->WritePropertyBatch(c, batch, n);
+    if (kept.empty()) return TrackedProp_Success;
+    std::vector<PropertyWrite_t> pass;
+    pass.reserve(kept.size());
+    for (const uint32_t i : kept) pass.push_back(batch[i]);
+    const ETrackedPropertyError r = real_->WritePropertyBatch(c, pass.data(), uint32_t(pass.size()));
+    for (size_t k = 0; k < kept.size(); ++k) {
+      batch[kept[k]].eSetError = pass[k].eSetError;
+      batch[kept[k]].eError = pass[k].eError;
+    }
+    return r;
+  }
+  const char* GetPropErrorNameFromEnum(ETrackedPropertyError e) override { return real_->GetPropErrorNameFromEnum(e); }
+  PropertyContainerHandle_t TrackedDeviceToPropertyContainer(TrackedDeviceIndex_t d) override {
+    return real_->TrackedDeviceToPropertyContainer(d);
+  }
+
+ private:
+  IVRProperties* real_;
+  StockHmd* owner_;
+  std::atomic<bool> logged_{false};
+};
+
 class StockHmd::Context : public IVRDriverContext {
  public:
-  Context(IVRDriverContext* real, Host* host, Settings* settings, StockHmd::LogFilter* log)
-      : real_(real), host_(host), settings_(settings), log_(log) {}
+  Context(IVRDriverContext* real, Host* host, Settings* settings, Properties* properties, StockHmd::LogFilter* log)
+      : real_(real), host_(host), settings_(settings), properties_(properties), log_(log) {}
   void* GetGenericInterface(const char* version, EVRInitError* error) override {
     if (version && std::string(version) == IVRServerDriverHost_Version) {
       if (error) *error = VRInitError_None;
       return host_;
+    }
+    if (properties_ && version && std::string(version) == IVRProperties_Version) {
+      if (error) *error = VRInitError_None;
+      return properties_;
     }
     if (log_ && version && std::string(version) == IVRDriverLog_Version) {
       if (error) *error = VRInitError_None;
@@ -551,6 +603,7 @@ class StockHmd::Context : public IVRDriverContext {
   IVRDriverContext* real_;
   Host* host_;
   Settings* settings_;
+  Properties* properties_;
   StockHmd::LogFilter* log_;
   StockMailbox* mailbox_ = nullptr;  // created on first request, never freed (as the rest)
 };
@@ -687,9 +740,11 @@ bool StockHmd::Load(const std::string& path, IVRDriverContext* realContext, LogF
     }
     settings_ = new Settings(realSettings, std::move(defaults));
   }
+  if (auto* realProperties = static_cast<IVRProperties*>(real_->GetGenericInterface(IVRProperties_Version, nullptr)))
+    properties_ = new Properties(realProperties, this);
   if (auto* realLog = static_cast<IVRDriverLog*>(real_->GetGenericInterface(IVRDriverLog_Version, nullptr)))
     logProxy_ = new LogFilter(realLog);
-  context_ = new Context(real_, host_, settings_, logProxy_);
+  context_ = new Context(real_, host_, settings_, properties_, logProxy_);
   const EVRInitError r = provider->Init(context_);
   if (r != VRInitError_None) {
     if (log_) log_("stock driver: Init failed (" + std::to_string(int(r)) + ")");
@@ -718,6 +773,10 @@ void StockHmd::PushEvent(const VREvent_t& event) {
 
 void StockHmd::RunFrame() {
   if (provider_) provider_->RunFrame();
+}
+
+void StockHmd::LeaveStandby() {
+  if (provider_) provider_->LeaveStandby();
 }
 
 std::optional<StockHmd::Activated> StockHmd::TakeActivated() {

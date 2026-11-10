@@ -95,6 +95,27 @@ write_image() {
   rm -f "$padded"
 }
 
+red=$'\e[1;37;41m' yellow=$'\e[1;33m' reset=$'\e[0m'
+[[ -t 1 ]] || red="" yellow="" reset=""
+cat <<TXT
+
+${red}                                                                              ${reset}
+${red}   !!!  WARNING: ONLY FOR LIGHTHOUSE 1.0 BASE STATIONS (HTC VIVE, 2016)  !!!   ${reset}
+${red}                                                                              ${reset}
+
+${yellow}  This firmware is ONLY for Lighthouse 1.0 base stations: the HTC ones that came
+  with the original Vive (model 1.0, a mode button and channel letter on the back).
+
+  NEVER use it on a Lighthouse 2.0 base station (Valve Index / SteamVR Base
+  Station 2.0, or HTC's Base Station 2.0). It will BRICK a 2.0 base station.
+
+  If you're not sure which one you have, STOP and close this window.${reset}
+
+TXT
+read -r -p "Type 1.0 to confirm this is a Lighthouse 1.0 base station: " generation
+[[ $generation == "1.0" ]] || { echo "Stopped. Nothing was changed."; exit 0; }
+echo
+
 echo "lhbs base station firmware installer"
 echo
 if [[ -n $restore ]]; then
@@ -107,6 +128,12 @@ echo
 
 mnt=$(wait_for_drive)
 echo "Found the base station."
+# A Lighthouse 1.0 base station's bootloader drive holds its whole 128 KiB flash.
+# Anything else isn't one: stop before reading or writing anything.
+if [[ $(stat -c %s "$mnt/firmware.bin" 2>/dev/null) != 131072 ]]; then
+  eject "$mnt"
+  fail "this isn't a Lighthouse 1.0 base station (its firmware.bin isn't 128 KiB). Nothing was written."
+fi
 
 if [[ -z $restore ]]; then
   echo

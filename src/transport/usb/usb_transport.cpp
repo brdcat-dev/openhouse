@@ -467,12 +467,103 @@ bool UsbTransport::TakePairing(Open& o) {
   return n == int(report.size()) && command.milliseconds > 0;
 }
 
+std::string UsbTransport::BluetoothReceiver() const {
+  std::lock_guard lock(receiversMutex_);
+  for (const auto& [serial, r] : receivers_)
+    if (IsBluetoothReceiver(r.pid, serial)) return serial;
+  return {};
+}
+
+bool UsbTransport::HasBluetoothReceiver() const { return !BluetoothReceiver().empty(); }
+
+std::optional<RadioMode> UsbTransport::RunRadioCommand(const std::string& receiver, std::optional<RadioMode> set) {
+  auto command = std::make_shared<RadioCommand>();
+  command->receiver = receiver;
+  command->set = set;
+  auto result = command->result.get_future();
+  {
+    std::lock_guard lock(hapticMutex_);
+    radioCommands_.push_back(command);
+  }
+  if (result.wait_for(std::chrono::seconds(2)) == std::future_status::ready) return result.get();
+  // The receiver went away, so nothing will take it.
+  std::lock_guard lock(hapticMutex_);
+  radioCommands_.erase(std::remove(radioCommands_.begin(), radioCommands_.end(), command), radioCommands_.end());
+  return std::nullopt;
+}
+
+void UsbTransport::TakeRadioCommands(Open& o) {
+  if (o.receiver.empty()) return;
+  std::vector<std::shared_ptr<RadioCommand>> commands;
+  {
+    std::lock_guard lock(hapticMutex_);
+    for (auto it = radioCommands_.begin(); it != radioCommands_.end();) {
+      if ((*it)->receiver != o.receiver) { ++it; continue; }
+      commands.push_back(*it);
+      it = radioCommands_.erase(it);
+    }
+  }
+  for (const auto& command : commands) {
+    std::optional<RadioMode> answer;
+    if (command->set) {
+      const auto report = RadioModeReport(*command->set);
+      if (hid_send_feature_report(o.dev, report.data(), report.size()) == int(report.size())) {
+        answer = command->set;
+        o.bluetooth = *command->set == RadioMode::Bluetooth;
+      }
+      Log(LogLevel::Debug, "receiver %s: radio to %s: %s\n", o.receiver.c_str(),
+          *command->set == RadioMode::Bluetooth ? "Bluetooth" : "Valve's", answer ? "sent" : "failed");
+    } else {
+      const auto query = RadioModeQuery();
+      if (hid_send_feature_report(o.dev, query.data(), query.size()) == int(query.size())) {
+        std::array<uint8_t, 64> reply{};
+        reply[0] = 0xff;
+        const int n = hid_get_feature_report(o.dev, reply.data(), reply.size());
+        answer = ParseRadioMode(reply.data(), n);
+      }
+    }
+    command->result.set_value(answer);
+  }
+}
+
+bool UsbTransport::SetBluetoothRadio(bool on) {
+  const std::string receiver = BluetoothReceiver();
+  if (receiver.empty()) return false;
+  if (!on) return RunRadioCommand(receiver, RadioMode::Valve).has_value();
+  bool ok = false;
+  if (RunRadioCommand(receiver, RadioMode::Bluetooth)) {
+    for (int attempt = 0; attempt < 3 && !ok; ++attempt) {
+      if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      ok = RunRadioCommand(receiver, std::nullopt) == RadioMode::Bluetooth;
+    }
+  }
+  if (!ok) {
+    Log(LogLevel::Warn, "receiver %s: its radio didn't switch to Bluetooth\n", receiver.c_str());
+    RunRadioCommand(receiver, RadioMode::Valve);
+  }
+  return ok;
+}
+
+std::optional<bool> UsbTransport::BluetoothRadioOn() {
+  const std::string receiver = BluetoothReceiver();
+  if (receiver.empty()) return std::nullopt;
+  const auto mode = RunRadioCommand(receiver, std::nullopt);
+  if (!mode) return std::nullopt;
+  return *mode == RadioMode::Bluetooth;
+}
+
 void UsbTransport::ProbeMain() {
+  // Someone is waiting for each radio command, so they don't wait for the slow parts below.
+  const auto serveRadio = [this] {
+    for (auto& o : idle_) TakeRadioCommands(o);
+  };
   while (!stop_) {
     Enumerate(false);
     for (size_t i = 0; i < idle_.size() && !stop_;) {
+      serveRadio();
       Open& o = idle_[i];
       TakePairing(o);
+      if (o.bluetooth) { ++i; continue; }  // nothing can connect to it for now
       DeviceInfo di;
       if (!QueryDeviceInfo(o.dev, &di, 2) || di.serial == 0) { ++i; continue; }
       char sn[16];
@@ -489,7 +580,10 @@ void UsbTransport::ProbeMain() {
       havePending_ = true;
       idle_.erase(idle_.begin() + long(i));
     }
-    for (int k = 0; k < 10 && !stop_; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (int k = 0; k < 10 && !stop_; ++k) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      serveRadio();
+    }
   }
 }
 
@@ -603,6 +697,7 @@ void UsbTransport::Run() {
       // Pairing a receiver that has a device: the device is replaced, so the receiver
       // is reopened (as one with no device) and the new one picked up when it connects.
       if (!o.disconnected && TakePairing(o)) o.disconnected = true;
+      if (!o.disconnected) TakeRadioCommands(o);
     }
     for (auto& o : open_) {
       if (o.disconnected) continue;

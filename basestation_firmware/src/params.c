@@ -186,6 +186,29 @@ static cp_result_t save_type(int type, int *out)
 
 cp_result_t params_save(int *out) { return save_type(PART_USER, out); }
 
+/* Laser drive currents a healthy unit can't have (they run 117-172, stock default 190).
+ * Firmware before 2026-11-08 saved the power regulation's current on every channel change,
+ * which ratcheted some units down to 1: they then fault as soon as the rotors spin, since
+ * regulation may only move the current 60 from where it booted. Such a value comes from
+ * the factory partition instead (or the stock default), and is saved, so it's fixed for
+ * good. */
+static bool laser_current_sane(uint8_t c) { return c >= 80 && c <= 230; }
+
+static void repair_laser_currents(int *out)
+{
+    if (laser_current_sane(P.laser_0_current) && laser_current_sane(P.laser_1_current)) return;
+    uint8_t c0 = 190, c1 = 190;
+    if (load_type(PART_FACTORY, 0) == CP_OK) {
+        if (laser_current_sane(P.laser_0_current)) c0 = P.laser_0_current;
+        if (laser_current_sane(P.laser_1_current)) c1 = P.laser_1_current;
+    }
+    params_defaults();
+    if (load_type(PART_USER, out) != CP_OK) return;
+    if (!laser_current_sane(P.laser_0_current)) P.laser_0_current = c0;
+    if (!laser_current_sane(P.laser_1_current)) P.laser_1_current = c1;
+    save_type(PART_USER, 0);
+}
+
 cp_result_t params_load(int *out)
 {
     params_defaults();
@@ -198,7 +221,10 @@ cp_result_t params_load(int *out)
         cp_result_t r = params_save(out);
         return r ? r : CP_LOADED_DEFAULTS;
     }
-    if (load_type(PART_USER, out) == CP_OK) return CP_OK;
+    if (load_type(PART_USER, out) == CP_OK) {
+        repair_laser_currents(out);
+        return CP_OK;
+    }
     if (load_type(PART_FACTORY, out) == CP_OK) return CP_LOADED_FACTORY;
     params_defaults();
     return CP_NO_PARTITIONS;

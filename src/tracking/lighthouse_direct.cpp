@@ -669,7 +669,7 @@ std::string LighthouseDirect::HealthCheck(double now) const {
     std::snprintf(text, sizeof text, "bad base station orientation ( %.4g, %.4g )", x[16] * 57.29577951308232,
                   x[17] * 57.29577951308232);
     reason = text;
-  } else if (std::fabs(x[18] - 9.80665) > 0.49033249999999996) {
+  } else if (std::fabs(x[18] - 9.80665) > filter_.gravityTolerance) {
     std::snprintf(text, sizeof text, "unlikely gravity %.3g m/s/s", x[18]);
     reason = text;
   } else if (x[28] * x[28] + x[29] * x[29] + x[30] * x[30] > 0.06853891945200943) {

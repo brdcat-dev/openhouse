@@ -17,6 +17,14 @@ constexpr double kOutOfRangeAge = 0.25;                         // 0x1a9bc8 (sta
 // controller recording: 1e-6 -> 0.34 mm std, 4e-4 -> 0.13 mm, 1e-3 -> 0.10 mm.
 constexpr double kAltPriorVariance = 4e-4;
 constexpr int kRejectStreak = 20;  // ~0.3 s of a base's well-lit frames all rejected
+// Reacquire throttling (not stock). A reacquire is a hard reset, so repeating it every
+// few hundred ms turns one bad stretch into a permanent ping-pong, and the reset cannot
+// fix what it rejected. Exponential from the base, capped, so a device still recovers -
+// just at a rate that cannot hide the underlying fault. See device_tracker.hpp.
+constexpr double kReacquireBackoffBase = 0.5;     // s: floor after a settled stretch
+constexpr double kReacquireBackoffMax = 8.0;      // s: cap
+constexpr double kReacquireSameBaseWindow = 2.0;  // s: never restart on the same base sooner
+constexpr double kReacquireSettle = 10.0;         // s: quiet that clears the burst count
 // Consecutive light pulses timestamped behind the filter that mean a new epoch
 // (~0.5 s of light from one base).
 constexpr int kBackwardPulseReset = 1000;
@@ -182,9 +190,21 @@ void DeviceTracker::HandleFrame(const OpticalFrame& original) {
         // base). The limits themselves are unchanged; only the reason is recorded.
         if (streak == kRejectStreak) {
           const auto& f = filter_->Filter();
-          char text[200];
-          std::snprintf(text, sizeof text, "base %08X: %d well-lit frames rejected in a row (%s, %d sensor rows)",
-                        frame.baseSerial, streak, direct::RejectReasonName(f.lastRejectReason), f.lastRejectRows);
+          // An alternate base's limit says which slot tripped and how large the refused
+          // correction was: 1.02 deg against a 1 deg limit is a threshold problem, 40 deg is
+          // a pair that does not fit, and the two want opposite fixes. Position prints in
+          // cm, rotation in deg. The correction is the whole refused step, not the excess.
+          char tail[96] = "";
+          if (f.lastRejectSlot >= 0 && f.lastRejectLimit > 0) {
+            const bool rot = f.lastRejectReason == direct::kRejectAltBaseRot;
+            const double scale = rot ? 57.29577951308232 : 100.0;  // rad -> deg, m -> cm
+            std::snprintf(tail, sizeof tail, "; %08X: correction %.2f %s, limit %.2f %s",
+                          filter_->BaseSerial(f.lastRejectSlot + 1), f.lastRejectOver * scale,
+                          rot ? "deg" : "cm", f.lastRejectLimit * scale, rot ? "deg" : "cm");
+          }
+          char text[256];
+          std::snprintf(text, sizeof text, "base %08X: %d well-lit frames rejected in a row (%s, %d sensor rows%s)",
+                        frame.baseSerial, streak, direct::RejectReasonName(f.lastRejectReason), f.lastRejectRows, tail);
           Log(text);
         }
       } else if (filter_->LastOpticalTime() != lastOpticalBefore) {
@@ -430,7 +450,9 @@ void DeviceTracker::SyncRoom() {
         // light: the device's pose is what's wrong (session-post: a left controller
         // bootstrapped on E236DC40 into a pose its A101B835 light never fit, rejected
         // for 40 s while it drifted, until it ran out of bounds).
-        if (!apply && roomSigma < 0.005 && ++disagreeing_[e.serial] >= 2) reacquireOn_ = e.serial;
+        // Held off by the reacquire backoff: do not even queue another (see its use site).
+        if (!apply && roomSigma < 0.005 && ++disagreeing_[e.serial] >= 2 && Now() >= reacquireBlockedUntil_)
+          reacquireOn_ = e.serial;
         streak0 = streak1 = 0;
       } else {
         // The room is the joint view of every device: a filter clearly off it (> 1 cm,
@@ -490,15 +512,26 @@ void DeviceTracker::CheckHealth() {
     reacquireOn_ = 0;
     disagreeing_.clear();
     if (!stock) {
-      char text[160];
-      std::snprintf(text, sizeof text, "base %08X's light keeps contradicting the pose from %08X: reacquiring on %08X",
-                    on, primary, on);
+      const double now = Now();
+      if (now - lastReacquireAt_ > kReacquireSettle) reacquireBurst_ = 0;
+      const int shift = std::min(reacquireBurst_, 5);
+      const double backoff = std::min(kReacquireBackoffMax, kReacquireBackoffBase * double(1u << shift));
+      const bool sameBase = on == lastReacquireOn_;
+      const double holdOff = sameBase ? std::max(backoff, kReacquireSameBaseWindow) : backoff;
+      char text[176];
+      std::snprintf(text, sizeof text,
+                    "base %08X's light keeps contradicting the pose from %08X: reacquiring on %08X (attempt %d)",
+                    on, primary, on, reacquireBurst_ + 1);
       Log(text);
       const auto& f = filter_->Filter();
       if (f.updateCount > 200 && f.CalibrationHealthy()) carry_ = f;
       ResetFilter();
-      avoidBase_ = std::make_pair(primary, Now() + 1.0);
-      switchedAt_ = Now();
+      avoidBase_ = std::make_pair(primary, now + 1.0);
+      switchedAt_ = now;
+      lastReacquireOn_ = on;
+      lastReacquireAt_ = now;
+      reacquireBlockedUntil_ = now + holdOff;
+      ++reacquireBurst_;
       return;
     }
   }
@@ -705,15 +738,26 @@ void DeviceTracker::UpdateOutput() {
   } else {
     const double dt = raw.deviceTime - lastRaw_.deviceTime;
     if (dt > 0 && dt < 0.25) {
-      // Where the last raw pose was heading; what it can't explain is a jump.
-      const Eigen::Vector3d expectP = lastRaw_.worldFromImu.translation() + lastRaw_.velocity * dt;
-      const Eigen::Vector3d rot = lastRaw_.angularVelocity * dt;
+      // Where the last raw pose was heading; what it can't explain is a jump. The mean of
+      // the two velocities, so acceleration within the step (a head starting to turn)
+      // reads as motion rather than as a jump.
+      const Eigen::Vector3d expectP = lastRaw_.worldFromImu.translation() + 0.5 * (lastRaw_.velocity + raw.velocity) * dt;
+      const Eigen::Vector3d rot = 0.5 * (lastRaw_.angularVelocity + raw.angularVelocity) * dt;
       const Eigen::Quaterniond expectQ = (rot.norm() > 1e-12 ? Eigen::Quaterniond(Eigen::AngleAxisd(rot.norm(), rot.normalized()))
                                                              : Eigen::Quaterniond::Identity()) * Eigen::Quaterniond(lastRaw_.worldFromImu.rotation());
       const Eigen::Vector3d jumpP = p - expectP;
       const Eigen::Quaterniond jumpQ = q * expectQ.conjugate();
-      if (jumpP.norm() > 0.002) offsetP_ -= jumpP;
-      if (Eigen::AngleAxisd(jumpQ).angle() > 0.0087) offsetQ_ = offsetQ_ * jumpQ.conjugate();
+      // Which jumps glide depends on speed. Near still, all of them: the light's small
+      // corrections otherwise show at once, and a nearby cockpit shimmers (live, head
+      // held still: 79 steps/s, median 0.05 mm, max 0.42 mm, all under the 2 mm that
+      // used to be needed to glide). Moving, only clear jumps (2 mm, 0.5 deg), as
+      // before: small corrections hide in the motion there, and nothing should trail.
+      constexpr double kJumpP = 0.002, kJumpQ = 0.0087, kMicroJumpP = 1e-5, kMicroJumpQ = 5e-6;
+      auto ramp = [](double x, double lo, double hi) { return std::clamp((x - lo) / (hi - lo), 0.0, 1.0); };
+      const double fast = std::max(ramp(raw.velocity.norm(), 0.05, 0.3), ramp(raw.angularVelocity.norm(), 0.15, 1.0));
+      if (jumpP.norm() > kMicroJumpP + (kJumpP - kMicroJumpP) * fast) offsetP_ -= jumpP;
+      if (Eigen::AngleAxisd(jumpQ).angle() > kMicroJumpQ + (kJumpQ - kMicroJumpQ) * fast)
+        offsetQ_ = offsetQ_ * jumpQ.conjugate();
       // Corrections over 10 cm glide 2.5x slower (they were jumps of a wrong pose).
       const double tauP = offsetP_.norm() > 0.1 ? 2.5 * smoothPosition_ : smoothPosition_;
       // The glide runs on output time: dt is filter time, and across a reacquire it
@@ -736,7 +780,7 @@ void DeviceTracker::UpdateOutput() {
   Eigen::Quaterniond outQ = (offsetQ_ * q).normalized();
   // Still: the pose it came to rest at, whatever few-sensor optics (one base, a side
   // on the sheet) make of it meanwhile (live: 21 cm of depth drift on a bed).
-  if (still_ && holdStill_) {
+  if (still_ && holdStill_ && allowHold_) {
     if (!heldPose_) heldPose_ = Eigen::Isometry3d(Eigen::Translation3d(outP) * outQ);
     offsetP_ = heldPose_->translation() - p;  // moving off glides from here
     offsetQ_ = (Eigen::Quaterniond(heldPose_->rotation()) * q.conjugate()).normalized();

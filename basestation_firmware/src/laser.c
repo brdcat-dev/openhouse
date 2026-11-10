@@ -239,6 +239,9 @@ static void apc_sample(int n)
      * stopped following the current still ends here, in a fault. */
     int hi = boot_current[n] + 60, lo = boot_current[n] - 60;
     if (hi > 230) hi = 230;
+    /* never below 1: the current is a u8, and from a boot current under 60 the
+     * decrement below wrapped 0 to 255, past the cap, with no fault (#21) */
+    if (lo < 1) lo = 1;
     if (target - pw > 1.0f) {
         if (*cur >= hi) {                   /* would exceed the safety window */
             laser_fault = true;

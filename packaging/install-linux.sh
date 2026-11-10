@@ -10,12 +10,13 @@ marker="liblh session started"
 if [[ ! -f "$backup" ]] || ! grep -qa "$marker" "$target"; then
   # Not ours: SteamVR's (first install, or a SteamVR update put a newer one in place).
   grep -qa "$marker" "$target" && { echo "openhouse is installed but SteamVR's driver backup is gone. Verify SteamVR's files in Steam, then run this again." >&2; exit 1; }
-  cp -p "$target" "$backup"
+  cp -pf "$target" "$backup"
   echo "Saved SteamVR's driver as $backup"
 fi
 mkdir -p "$dir/lh-libs"
 cp -a "$here/lh-libs/." "$dir/lh-libs/"
-cp "$here/driver_lighthouse.so" "$target.new" && mv "$target.new" "$target"
+rm -f "$target.new"
+cp "$here/driver_lighthouse.so" "$target.new" && mv -f "$target.new" "$target"
 install_schema  # the openhouse page in SteamVR's settings
 # The update check: warns in SteamVR's next session if an update replaced this driver.
 mkdir -p "$check_dir"

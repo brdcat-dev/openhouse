@@ -126,6 +126,24 @@ of 2154 device-seconds; not worth building yet.
   twice running, relearns the base (20 cm prior, re-placed on the first solve under
   2 cm). Recalled (cached) frames are ignored. Stock bases send it once at power-up, so
   for them only the solves and the devices' own filters notice.
+* Locked bases (`RoomMap::Locked`: 100+ keyframes and within 20 mm) used to move only on
+  an accelerometer bump, so a nudge under 1.2 deg was never corrected (GitHub #4: every
+  device jumping in turn between two poses). `Session::LightMovedLockedBase` treats a
+  locked base as knocked (`RoomMap::Bump`, relearned from fresh keyframes) when, 3
+  solves running (5 for one device whose keyframes span < 10 s):
+  * the solve places it off by max(15 mm, 1 % of its distance) or 0.75 deg, beyond
+    4 sigma; or
+  * the fit rejects at least a quarter of the keyframes that see it (15+) while
+    rejecting under a tenth of the others. This is what a nudge shows first: the fit
+    keeps the old pose by rejecting every new keyframe (nudge-01, ch3 tapped, turned and
+    moved: rejections 1 -> 85, the solve moving 2 mm; flagged at 40 s, re-placed 10.6 mm
+    / 9.15 deg at 44 s, rejections back to 1-5). `SolvedBase::seen/rejected` carry it,
+    and a base whose keyframes were all rejected is still reported at its room pose.
+  One light relearn per base a minute. On vrchat-01 / qls-post / ms4-01 / fastmotion /
+  testswing (learned room, then replayed against it) the rejection rule never fired;
+  the distance rule fired once per vrchat-01 pass, on a 5 m base the learned room had
+  locked 172 mm off. Open: a moved unlocked base drops all its keyframes, not only
+  older ones; a relearn that never gets under 2 cm has no timeout.
 * The origin can't move in the room (it is the gauge): when it is knocked, or two other
   bases are off together, it is re-solved against the best other base, and the host
   frame re-anchors on the room's epoch so the world stays put.
@@ -141,6 +159,17 @@ of 2154 device-seconds; not worth building yet.
 Not effective on this data: per-row innovation gating of optical updates
 (`DirectFilter::gateSigma`, 4 sigma) changed nothing measurable; it is kept as a cheap
 safety net.
+
+## Output stage (`DeviceTracker::UpdateOutput`)
+
+From a GitHub patch (Pimax Dream Air, seated): the stillness hold is off for headsets
+(`SetHoldStill`, a still head froze the view, then caught up 0.1-0.65 deg), and near
+still every unexplained step glides (thresholds ramp from 10 um / 5 urad under
+0.05 m/s / 0.15 rad/s back to 2 mm / 0.5 deg by 0.3 m/s / 1 rad/s; the expected motion
+uses the mean of both velocities). The gravity state may sit 10 % from 9.80665 with the
+improvements (stock 5 %, `DirectFilter::gravityTolerance`): a controller reading 5 % low
+reset every time (#14). Reacquires back off (0.5 s doubling to 8 s, 2 s minimum on the
+same base, cleared after 10 s quiet; PR #9).
 
 ## The host frame
 

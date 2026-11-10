@@ -3,5 +3,5 @@
 #pragma once
 
 namespace lh {
-inline constexpr const char* kVersion = "1.0.0";
+inline constexpr const char* kVersion = "1.0.2";
 }

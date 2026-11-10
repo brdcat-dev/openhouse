@@ -204,6 +204,9 @@ class SessionImpl final : public Session, public InputSinkBase {
   bool SetPairing(const std::string& receiver, double seconds) override {
     return usb_ && usb_->SetPairing(receiver, int(std::lround(seconds * 1000)));
   }
+  bool HasBluetoothRadio() const override { return usb_ && usb_->HasBluetoothReceiver(); }
+  bool SetBluetoothRadio(bool on) override { return usb_ && usb_->SetBluetoothRadio(on); }
+  std::optional<bool> BluetoothRadioOn() override { return usb_ ? usb_->BluetoothRadioOn() : std::nullopt; }
   bool Haptic(const std::string& serial, double frequency, double amplitude, double duration) override;
   bool PowerOff(const std::string& serial) override;
   bool SaveRoom(std::string* error) override;
@@ -267,6 +270,10 @@ class SessionImpl final : public Session, public InputSinkBase {
   void CollectLogs(Device* d);
   void MaybeSave();
   void ResetRoomLocked(const std::string& why);
+  bool LightMovedLockedBase(const RoomSolveOutput& out);
+  std::map<uint32_t, int> lightStrikes_;  // LightMovedLockedBase: solves in a row that moved it
+  std::map<uint32_t, double> lightCooldown_;  // and until when (now_) it doesn't again
+  std::set<std::string> excludedFromRoom_;     // devices the last solve left out
   void WatchRoomFile(bool now = false);
   uint64_t RoomResets() const override { std::lock_guard lock(mutex_); return roomResets_; }
   void ReplayMain();
@@ -376,7 +383,8 @@ bool SessionImpl::Start(std::string* error) {
     o.steamLighthouseConfigDir = options_.steamConfigDir;
     o.capturePath = options_.capturePath;
     o.onCommandResult = [this](const usb::DeviceCommandResult& result) {
-      const bool routine = std::string(result.status) == "written";
+      // A power-off is rare and worth seeing in the host log whatever happened to it.
+      const bool routine = std::string(result.status) == "written" && !result.powerOff;
       std::lock_guard lock(mutex_);
       std::ostringstream text;
       text << (result.powerOff ? "power-off " : "haptic ") << result.serial << ": " << result.status
@@ -586,6 +594,7 @@ bool SessionImpl::SetUpDevice(const DeviceId& id, const std::string& config) {
     d.tracker = std::make_unique<DeviceTracker>(id, model, &room_);
     d.tracker->SetSmoothing(smoothPosition_, smoothRotation_);
     d.tracker->SetReportAcceleration(reportAcceleration_);
+    d.tracker->SetHoldStill(d.info.role != DeviceRole::Hmd);  // a still head must not freeze the view
     models_[id] = d.tracker->ImuModel();
     for (const auto& [serial, b] : bases_) d.tracker->OnBaseConfig(b.config, b.dynamic);
     PushIdentities();
@@ -915,6 +924,10 @@ void SessionImpl::ApplySolve(const RoomSolveOutput& out) {
                   worstTurn * 57.2958, solveInterval_);
     Emit(SessionEventType::Log, "", text, LogLevel::Debug);
   }
+  if (LightMovedLockedBase(out)) {
+    CollectLogs(nullptr);
+    return;
+  }
   if (room_.OriginRelearning()) {
     const auto o = out.bases.find(origin);
     if (o != out.bases.end() && o->second.keyframes > 0)
@@ -944,6 +957,105 @@ void SessionImpl::ApplySolve(const RoomSolveOutput& out) {
       room_.ApplySolved(serial, b.worldFromBase, b.positionVariance, b.rotationVariance, b.keyframes, b.rms, b.fresh,
                           b.devices, b.span);
   CollectLogs(nullptr);
+}
+
+// A locked base is moved by nothing but its accelerometer, and a nudge under kBumpRad
+// (a photo stand knocked a little) never trips that: every device then fights the stale
+// pose its own way, reacquiring one after another (GitHub report: controllers and the
+// headset jumping in turn between two "universes", forever). The solver re-solves every
+// keyframe's device pose from the light itself, so a drifting filter can't fake this:
+// solves that place a locked base clearly elsewhere, several in a row, are a move, handled
+// like a knock (relearned from fresh keyframes). From one device only, its keyframes must
+// span 10 s and it takes more solves (one short stretch from one spot can't tell a moved
+// base from a misplaced device). A moved origin shows as every other base moved alike.
+bool SessionImpl::LightMovedLockedBase(const RoomSolveOutput& out) {
+  {
+    std::set<std::string> now;
+    for (const auto& [device, ratio] : out.excludedDevices) now.insert(device);
+    if (now != excludedFromRoom_) {
+      for (const auto& [device, ratio] : out.excludedDevices)
+        if (!excludedFromRoom_.count(device)) {
+          char text[200];
+          std::snprintf(text, sizeof text, "%s: its light fits the room %.1fx worse than the other devices'; left out of the room solve until it agrees",
+                        device.c_str(), ratio);
+          Emit(SessionEventType::Log, device, text, LogLevel::Warn);
+        }
+      for (const auto& device : excludedFromRoom_)
+        if (!now.count(device)) Emit(SessionEventType::Log, device, device + ": agrees with the room again; back in the room solve", LogLevel::Info);
+      excludedFromRoom_ = now;
+    }
+  }
+  // Floors: 15 mm, or 1 % of the base's distance (a base 5 m away wanders 3-5 cm between
+  // solves: vrchat-01), and 0.75 deg. One relearn from the light per base a minute, so a
+  // base it relocks too soon can't cycle.
+  constexpr double kFloor = 0.015, kFloorPerMetre = 0.01, kRotFloor = 0.75 * M_PI / 180, kSigmas = 4;
+  constexpr double kCooldown = 60;
+  constexpr int kStrikes = 3, kStrikesOneDevice = 5;  // solves in a row (1-4 s apart)
+  constexpr double kOneDeviceSpan = 10;              // s of one device's keyframes of the base
+  const uint32_t origin = room_.Origin();
+  if (room_.OriginRelearning()) return false;
+  struct Move { double mm, deg; int strikes, rejected = 0, seen = 0; };
+  std::map<uint32_t, Move> moved;
+  int others = 0;
+  for (const auto& [serial, b] : out.bases) {
+    const RoomBase* rb = room_.Base(serial);
+    if (!rb || serial == origin || !RoomMap::Locked(*rb)) continue;
+    if (const auto c = lightCooldown_.find(serial); c != lightCooldown_.end() && now_ < c->second) continue;
+    // The fit can keep the old pose by rejecting what disagrees: most keyframes that see
+    // this base rejected, those without it fitting. That is all a nudge shows until the
+    // window is mostly new keyframes (nudge-01: ch3's keyframes rejected 1 -> 85, then all
+    // of them, while the solve moved it 2 mm).
+    const int othersSeen = out.keyframesUsed + out.keyframesRejected - b.seen;
+    const int othersRejected = out.keyframesRejected - b.rejected;
+    // As clear from one device as from several: three solves, a quarter rejected, under
+    // a tenth of the others.
+    // More than one device must say so when more than one sees the base: one device's
+    // wrong view must not relearn the room.
+    const int needDevices = std::min(2, std::max(1, b.checkedDevices));
+    if (b.rejected >= 15 && b.rejected * 4 >= b.seen && othersSeen >= 10 && othersRejected * 10 <= othersSeen &&
+        b.rejectingDevices >= std::min(needDevices, std::max(1, b.devices))) {
+      moved[serial] = {0, 0, kStrikes, b.rejected, b.seen};
+      continue;
+    }
+    if (b.keyframes <= 0) continue;
+    ++others;
+    if (b.fresh <= 0 || b.devices < 1) continue;
+    if (b.devices < 2 && b.span < kOneDeviceSpan) continue;
+    const double dp = (b.worldFromBase.translation() - rb->worldFromBase.translation()).norm();
+    const double dr = Eigen::AngleAxisd(rb->worldFromBase.rotation().transpose() * b.worldFromBase.rotation()).angle();
+    const double sigma = std::sqrt((rb->positionVariance + b.positionVariance) / 3);
+    const double rsigma = std::sqrt((rb->rotationVariance + b.rotationVariance) / 3);
+    const double floor = std::max(kFloor, kFloorPerMetre * rb->worldFromBase.translation().norm());
+    // The solve drifting is not enough: a room fit at 400 urad wanders 10-50 mm between
+    // solves (live 2026-11-09: four false knocks at 11-51 mm, none with a keyframe
+    // rejected). A base that moved also has its keyframes rejected.
+    if ((dp > std::max(floor, kSigmas * sigma) || dr > std::max(kRotFloor, kSigmas * rsigma)) &&
+        b.supportingDevices >= needDevices && b.rejected >= 8 && b.rejected * 8 >= b.seen)
+      moved[serial] = {dp * 1e3, dr * 180 / M_PI, b.devices >= 2 ? kStrikes : kStrikesOneDevice};
+  }
+  // Every other base off at once (3+ bases): the origin moved, not all of them.
+  int farOff = 0;
+  for (const auto& [serial, m] : moved) farOff += m.rejected == 0;
+  if (others >= 2 && farOff == others && int(moved.size()) == others) {
+    int strikes = kStrikes;
+    for (const auto& [serial, m] : moved) strikes = std::max(strikes, m.strikes);
+    moved = {{origin, {0, 0, strikes}}};
+  }
+  for (auto it = lightStrikes_.begin(); it != lightStrikes_.end();)
+    it = moved.count(it->first) ? std::next(it) : lightStrikes_.erase(it);
+  bool bumped = false;
+  for (const auto& [serial, d] : moved) {
+    if (++lightStrikes_[serial] < d.strikes) continue;
+    lightStrikes_.erase(serial);
+    char why[160];
+    if (serial == origin) std::snprintf(why, sizeof why, "the light places every other base elsewhere, %d solves running", d.strikes);
+    else if (d.rejected) std::snprintf(why, sizeof why, "the light no longer fits it: %d of its %d keyframes rejected, %d solves running", d.rejected, d.seen, d.strikes);
+    else std::snprintf(why, sizeof why, "the light places it %.0f mm / %.2f deg away, %d solves running", d.mm, d.deg, d.strikes);
+    room_.Bump(serial, why);
+    lightCooldown_[serial] = now_ + kCooldown;
+    bumped = true;
+  }
+  return bumped;
 }
 
 void SessionImpl::SolverMain() {
@@ -1205,6 +1317,7 @@ void SessionImpl::SetDeviceEnabled(const std::string& serial, bool enabled) {
       d.tracker = std::make_unique<DeviceTracker>(serial, model, &room_);
       d.tracker->SetSmoothing(smoothPosition_, smoothRotation_);
       d.tracker->SetReportAcceleration(reportAcceleration_);
+      d.tracker->SetHoldStill(d.info.role != DeviceRole::Hmd);  // a still head must not freeze the view
       for (const auto& [base, b] : bases_) d.tracker->OnBaseConfig(b.config, b.dynamic);
       PushIdentities();
     }
@@ -1236,6 +1349,7 @@ void SessionImpl::ResetRoomLocked(const std::string& why) {
     d.tracker = std::make_unique<DeviceTracker>(id, model, &room_);
     d.tracker->SetSmoothing(smoothPosition_, smoothRotation_);
     d.tracker->SetReportAcceleration(reportAcceleration_);
+    d.tracker->SetHoldStill(d.info.role != DeviceRole::Hmd);  // a still head must not freeze the view
     for (const auto& [base, b] : bases_) d.tracker->OnBaseConfig(b.config, b.dynamic);
     d.lastState = TrackingState::Disconnected;
   }

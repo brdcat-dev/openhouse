@@ -111,13 +111,14 @@ a Vive headset (LHR-0704E07A). Quest Pro through WiVRn for VRChat.
 Alignment tools can read the room from `/openhouse-room-<uid>` (`include/lh/room_shm.h`;
 copies of that header in other projects must stay identical).
 
-## State of the work (2026-11-08)
+## State of the work (2026-11-10)
 
-Released as openhouse 1.0. Recent work, all in the tree:
-* Rooms: one "learned" rule (`BaseStationState::learned`: origin, <= 5 mm, or locked / 40+
-  keyframes <= 20 mm) drives settling, the SteamVR base status (searching until locked),
-  telemetry and the viewer. `Session::ResetRoom` forgets every room and rebuilds the
-  trackers; deleting `roommap.json` while running does the same.
+Version 1.0.2 (`include/lh/version.hpp`; v1.0.1 shipped still saying 1.0.0). Recent work:
+* Rooms: one "learned" rule (`BaseStationState::learned`) drives settling, SteamVR base
+  status, telemetry and the viewer. A base locks only within 20 mm. Locked bases are
+  relearned by a bump or by the light (`Session::LightMovedLockedBase`: solves placing it
+  elsewhere, or the fit rejecting its keyframes; `driver/tracking_improvements.md`).
+  `Session::ResetRoom` / deleting `roommap.json` forgets every room.
 * SteamVR settings page (`packaging/settingsschema.vrsettings`, section `driver_openhouse`):
   smoothing, acceleration prediction, Record Session (turning it off saves the bug report
   zip, `lh/bug_report.hpp`), Reset room. Only toggles/sliders/selects exist there; one-shot
@@ -134,18 +135,38 @@ Released as openhouse 1.0. Recent work, all in the tree:
 * lhbs sync cable (A/b/c) as stock: A, b and c drive the jack, A locks to it first and
   falls back to optical without one, multi leaves the jack undriven. A cable slave keeps
   P1_0 low. `ai/firmware/FIRMWARE_OVERVIEW.md` §5, `HARDWARE.md` log 2026-11-08.
+* Bug reports: replay `recording/*.lhraw` with `lhtool session ... --room COPY_OF config/roommap.json
+  --steam-db - --preinit - --trace OUT`. Mid-session recordings decode only with the Wv2
+  probes (`driver/wireless_protocol.md`); older builds see almost nothing in them.
+* `openhouse-check` (SteamVR autolaunch app; Monado/WiVRn: a user service) warns when a
+  SteamVR update replaced the driver, then asks GitHub's latest release and offers it
+  ("Ok" / "Open link"; zenity/kdialog, MessageBox; `OPENHOUSE_NO_UPDATE_CHECK`).
+* Installers (`apps/openhouse-installer` on Windows, `packaging/*.sh`): offer to close Steam /
+  SteamVR / Monado / WiVRn, overwrite with retries, refresh `.stock` whenever the
+  installed driver lacks the marker `liblh session started`; uninstall keeps a newer
+  SteamVR driver instead of restoring an old backup (#18).
+* Packages name no builder path: `-ffile-prefix-map` in CMake and both vcpkg triplets
+  (Ceres's port overrides CMAKE_CXX_FLAGS on MinGW; the triplet puts them back); Linux
+  tools get RUNPATH `$ORIGIN` with `liblh.so.1` beside them.
+* lhbs: a channel change saves the boot laser currents, not the regulated ones (they
+  ratcheted a unit down to 1: laser fault); a saved current outside 80-230 is repaired
+  at boot from the factory partition; the APC lower limit can't wrap (#21). The
+  firmware installers show a large "Lighthouse 1.0 only" warning, need `1.0` typed, and
+  refuse a drive whose `firmware.bin` isn't 128 KiB.
 
 Open:
-* A friend's Windows PC with no headset shows the pairing page stuck on "Initializing"
-  (no reply reached it). It works on the owner's Windows install; their `pairing:` log
-  lines are needed.
-* A base seen well by only one device never locks and gets relearned from poor views.
+* Multi-station over the sync cable (shelved): timing and superframe by pulse width,
+  the mask by width bits; first check P1_0 (a cable slave's input latches high with it
+  set, and every multi station raises it). `ai/firmware/MULTISTATION.md`.
+* SteamVR base station power control over Bluetooth: upstream USB radio requests are
+  retained alongside the Windows PC bridge and Index fallback. See
+  `driver/bluetooth.md` for measured hardware results and remaining standby checks.
+* Idle power-off reported not working; every step now logs, no log yet.
+* Jitter reports on LH2 + Index (#14 and another): replays show no resets and motion
+  like LH1 controllers at every speed; waiting for a video or an `openhouse-compare` run.
+* A friend's Windows PC with no headset: pairing page stuck on "Initializing".
 * Fly-aways right after a reacquire or a base newly used from the room map.
-* `openhouse-compare`: the stock side declines headsets (their Activate needs SteamVR
-  internals the host lacks); both drivers share the dongles, so either side's glitches
-  can be the other's commands.
-* lhbs `b`/`c` channels once came up sweeping in the same phase (both drivers saw it);
-  a power cycle of the `c` base fixed it. Not reproduced since.
+* `openhouse-compare`: the stock side declines headsets; both drivers share the dongles.
 
 ## Hard-won lessons
 

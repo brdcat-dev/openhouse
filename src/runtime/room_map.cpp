@@ -698,7 +698,9 @@ void RoomMap::ApplySolved(uint32_t serial, const Eigen::Isometry3d& pose, double
     Changed();
   }
   // Bumped: the first confident solve from fresh keyframes is the base's new place.
-  if (b.relearn && pv < kRelearnVariance) {
+  // From enough of the room to stand on: live, re-places from 1-8 keyframes locked
+  // again at once and the next knock followed.
+  if (b.relearn && pv < kRelearnVariance && keyframes >= 40 && (devices >= 2 || keyframes >= 80)) {
     std::snprintf(text, sizeof text, "Room solver: base %08X re-placed after a bump: %.1f mm, %.2f deg (%d keyframes, sigma %.1f mm)",
                   serial, dp * 1000, dr * 57.29577951308232, keyframes, std::sqrt(pv / 3) * 1000);
     Log(text);
@@ -707,6 +709,7 @@ void RoomMap::ApplySolved(uint32_t serial, const Eigen::Isometry3d& pose, double
     b.positionVariance = std::max(pv, kFloorVariance);
     b.rotationVariance = std::max(rv, 1e-9);
     b.observations = keyframes;
+    b.storedObservations = 0;  // earlier sessions' evidence is for the old place: lock again on new solves only
     b.inconsistent = 0;
     b.relearn = false;
     ++b.epoch;

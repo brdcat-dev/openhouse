@@ -20,6 +20,13 @@ Wv2 (5644 packets), legacy v0 (5618 packets) from an Index controller.
   Requesting 0 forces the legacy protocol (the driver always requests 1 now; the
   old override for legacy captures was removed).
 - Version 0 → legacy decoder, 1 → Wv2 decoder.
+- Not stock: a capture started mid-session (Record Session) has no transition packet,
+  and its sub-protocols (`opticalSub`, `controllerSub`) are announced too rarely to
+  appear. While on legacy, `WirelessReportParser` also decodes each packet with two Wv2
+  probes (optical 1 = LH2 words, optical 0 = LH1 pulses; controller 0, what live devices
+  announce); 20 in a row where legacy fails and a probe decodes switches to Wv2. Before
+  this, Windows Record Session captures decoded to no IMU and a few hundred pulses.
+  Windows pads every report to 59 bytes (Linux: 0x23 is 30).
 
 ## Legacy (v0) payload (0x3fdec0)
 1. Optional status header `0xe0–0xe7`: bit0 battery byte, bit1 → version-change byte, bit2 skip 1.

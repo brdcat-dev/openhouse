@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(liblighthouse VERSION 1.0.0 LANGUAGES CXX)
+project(liblighthouse VERSION 1.0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,8 @@ if(MSVC)
   add_compile_definitions(_USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+  # Release binaries name no path on the builder's machine (__FILE__ in messages).
+  add_compile_options(-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=)
 endif()
 if(WIN32)
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -38,6 +40,10 @@ option(LH_BUILD_TESTS "Build tests" ON)
 option(LH_BUILD_ORACLE_TESTS "Build tests that dlopen the original driver_lighthouse.so" ON)
 
 include(GNUInstallDirs)
+if(WIN32)
+  enable_language(RC)
+endif()
+include(cmake/windows/lh_windows_resources.cmake)
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(Ceres REQUIRED)
 find_package(nlohmann_json REQUIRED)
@@ -142,9 +148,23 @@ if(LH_BUILD_USB)
     add_executable(lhtool apps/lhtool/main.cpp)
     target_link_libraries(lhtool PRIVATE lh_usb lh_tracking lh)
     # Started by SteamVR each session: warns when an update replaced our driver.
+    if(WIN32)
+      # Replaces the .bat + PowerShell installer (Defender flagged that pattern).
+      add_executable(openhouse-installer apps/openhouse-installer/main.cpp)
+      target_link_libraries(openhouse-installer PRIVATE nlohmann_json::nlohmann_json)
+      target_link_libraries(openhouse-installer PRIVATE bcrypt)
+      if(MINGW)
+        target_compile_options(openhouse-installer PRIVATE -municode)
+        target_link_options(openhouse-installer PRIVATE -municode)
+      endif()
+    endif()
     add_executable(openhouse-check WIN32 apps/openhouse-check/main.cpp)
     if(MSVC)
       target_link_options(openhouse-check PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+    target_include_directories(openhouse-check PRIVATE include)
+    if(WIN32)
+      target_link_libraries(openhouse-check PRIVATE winhttp)
     endif()
     add_executable(lhcapture apps/lhcapture/main.cpp)
     target_include_directories(lhcapture PRIVATE src)
@@ -290,7 +310,7 @@ if(LH_BUILD_TESTS)
   endif()
   if(LH_BUILD_USB)
     target_sources(lh_unit_tests PRIVATE tests/unit/test_report_parser.cpp tests/unit/test_device_config.cpp
-      tests/unit/test_raw_capture.cpp)
+      tests/unit/test_raw_capture.cpp tests/unit/test_radio_mode.cpp)
     target_link_libraries(lh_unit_tests PRIVATE lh_usb)
     add_executable(lh_replay_tests tests/integration/test_replay.cpp)
     target_compile_definitions(lh_replay_tests PRIVATE LH_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -299,6 +319,11 @@ if(LH_BUILD_TESTS)
     add_test(NAME replay COMMAND lh_replay_tests)
   endif()
   add_test(NAME unit COMMAND lh_unit_tests)
+  if(WIN32 AND MSVC)
+    add_executable(lh_installer_tests tests/unit/test_windows_installer.cpp)
+    target_link_libraries(lh_installer_tests PRIVATE nlohmann_json::nlohmann_json bcrypt GTest::gtest_main)
+    add_test(NAME windows_installer COMMAND lh_installer_tests)
+  endif()
   if(TARGET driver_lighthouse)
     add_executable(lh_openvr_component_tests tests/openvr/test_components.cpp src/openvr/hand_skeleton.cpp src/openvr/raw_alignment.cpp src/openvr/room_publisher.cpp src/openvr/host_frame.cpp src/openvr/telemetry_server.cpp)
     target_include_directories(lh_openvr_component_tests PRIVATE src tests ${OPENVR_INCLUDE_DIR})
@@ -362,6 +387,25 @@ if(LH_BUILD_TESTS)
 endif()
 
 # ---- standalone CMake package --------------------------------------------------
+# Version information in the Windows binaries.
+foreach(entry
+    "lh|openhouse tracking library"
+    "driver_lighthouse|openhouse SteamVR lighthouse driver"
+    "lhtool|openhouse replay and diagnostics tool"
+    "lhcapture|openhouse device recorder"
+    "openhouse-check|openhouse update check"
+    "openhouse-viewer|openhouse viewer"
+    "openhouse-compare|openhouse and SteamVR driver comparison"
+    "lhviz|openhouse developer viewer"
+    "openhouse-installer|openhouse driver installer")
+  string(REPLACE "|" ";" parts "${entry}")
+  list(GET parts 0 name)
+  list(GET parts 1 text)
+  if(TARGET ${name})
+    lh_windows_resources(${name} "${text}")
+  endif()
+endforeach()
+
 include(CMakePackageConfigHelpers)
 configure_package_config_file(cmake/lighthouseConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/lighthouseConfig.cmake

@@ -20,7 +20,7 @@ A Lighthouse 1.0 base station is a timing source, not a camera. Every 1/60 s
 A device's photodiodes see the flash, then the laser crossing them. The time between
 the two is the sensor's angle from the base, which is all the tracking needs.
 
-Every flash also carries information in its **width** (62.5 to 135 µs, in 10.4 µs
+Every flash also carries information in its **width** (62.5 to 135 Âµs, in 10.4 Âµs
 steps). The width encodes 3 bits:
 - **skip:** "I am not sweeping after this flash".
 - **data:** one bit of the OOTX stream.
@@ -110,18 +110,18 @@ alone.
   flash of each group, which is the master's. Stock logic took any two back-to-back
   flashes one period apart, which never happens once other slaves are flashing.
 - **Sync cable (lhbs, as stock):** channels A, b and c drive the jack (P0_14, CT32B1 MAT1): a
-  pulse rising at each edge, falling `period/2` later, `± 100 000` ticks by the skip
+  pulse rising at each edge, falling `period/2` later, `Â± 100 000` ticks by the skip
   flag in master-tdm (opposite sign in slave-optical); multi leaves P0_14 undriven, as
   v1.0.1 did (no multi station listens, and all of them raise P1_0). Channel `A` (slave-cable)
   listens on P0_12 first: two rises one period apart lock it, the rises drive the
   rotors and the width sets sweep/skip. Locked, only edges that fit the signal count
-  (rises at 1–9 periods, the three widths stock sends). A loss gives the cable 2 s to
+  (rises at 1â€“9 periods, the three widths stock sends). A loss gives the cable 2 s to
   come back, then it follows optically; it goes back to the cable only when the pin
   (sampled every 10 ms) toggles, even from an optical lock. Tries that find no lock back
   off from 5 s to 60 s. A cable slave keeps P1_0 low, as stock does for slave-cable:
   raised, it corrupts its own cable input. `corr` shows the cable state.
 - **Emission permission:** a slave flashes only while locked and holding the phase
-  (within 20 µs), or locked to the cable. A master always may.
+  (within 20 Âµs), or locked to the cable. A master always may.
 - **Standby:** with no permission for 60 s, the base goes to standby. Rotors and lasers
   stop, the display goes dark and LED1 is green. Stock wakes only on the button or
   Bluetooth. **lhbs:** a slave keeps listening and wakes by itself once it locks onto a
@@ -133,13 +133,13 @@ alone.
   with the timebase and drives the fine PWM. The coarse PWM is fixed per unit (factory
   `rotor.r.pwm`, with `pwm.m`/`pwm.b` for temperature).
 - *Locked* means the error has stayed small for a while. Both rotors must be locked
-  (and 180° apart) before the lasers may fire.
+  (and 180Â° apart) before the lasers may fire.
 - A rotor that doesn't start within the kick timeout faults. The LED then blinks red.
 
 ## 7. Lasers and their safety (`laser.c`)
 
 - **Firing:** every turn, a timer event switches the laser on at `laser.r.start`
-  degrees and off again 124° later. That window covers the room in front of the base;
+  degrees and off again 124Â° later. That window covers the room in front of the base;
   the rest of the turn is dark.
 - **Safety layers:** a stationary beam isn't eye safe, so several layers keep the
   lasers off unless everything is right:
@@ -154,7 +154,7 @@ alone.
     never above 230. Hitting it means the power sense doesn't follow the current: laser
     FAULT, lasers off, LED blinking red.
   - It used to be +20, which faulted healthy units as they warmed up (D7B1AD76:
-    142 → 162 holding 29 mW).
+    142 â†’ 162 holding 29 mW).
 - **Factory calibration matters:** `laser.r.bias/current/pwr.*` and `rotor.r.pwm*` are
   per unit. The `calibration-rescue-244` stock image (2016-03-19) resets them to
   generic defaults. Don't use it. 89AE90F2 had to be restored from a backup with the
@@ -168,7 +168,7 @@ Payload v6 (33 bytes; the full layout is in the header of `ootx.c`):
   magnitude;
 - the rotor-lock count;
 - the hardware model;
-- the gravity direction (int8 × 3);
+- the gravity direction (int8 Ã— 3);
 - the mode byte and the faults.
 
 The frame is 17 zeros, a 1, then the length, payload, padding and crc32, with a 1
@@ -183,12 +183,12 @@ stuffed after every 16 bits. At 120 flashes/s a frame takes about 3 s.
 
 ## 9. Multi-station (`multi.c`, `ai/firmware/MULTISTATION.md`)
 
-The goal is 2–4 bases sharing a room, each sweeping in turn, with no cables and no
+The goal is 2â€“4 bases sharing a room, each sweeping in turn, with no cables and no
 stock-incompatible flashes.
 
-- **Channels:** the button cycles `A b c 1 2 3 4`. Slots 1–4 are multi channels. Slot 1
+- **Channels:** the button cycles `A b c 1 2 3 4`. Slots 1â€“4 are multi channels. Slot 1
   (slot 0 inside) is the master; the others are optical slaves. Each slave's flash comes
-  `slot × 250 µs` after the master's (`stagger` 12 000 ticks). Defaults after flashing:
+  `slot Ã— 250 Âµs` after the master's (`stagger` 12 000 ticks). Defaults after flashing:
   multi enabled, policy ALL (every flash carries an OOTX bit).
 - **The round:** the bases present take turns, one whole revolution each. The k-th
   present slot sweeps when `rev % count == k`, and the master is always k = 0. A base
@@ -230,7 +230,7 @@ and the worst case (a device seeing only one base) is 60/N Hz.
 
 **Reading a healthy multi slave:** `correlator locked`, small `realigns`, `superframe
 confirms 3`, and no "[no round from the master yet]". A healthy laser shows about
-29–30 mW with no FAULT.
+29â€“30 mW with no FAULT.
 
 ## 11. LEDs
 
@@ -254,3 +254,14 @@ make hosttest                   # 4 simulated stations: the round, collisions, s
 The installer backs up the old flash first. lhbs flash images also carry an EEPROM
 snapshot (`LHEEDUMP`) with the unit's calibration, so a wiped unit's calibration can be
 recovered from a backup.
+
+## Laser currents (2026-11-08 / 11-10)
+
+Power regulation (`laser.c`, `apc_sample`) moves each laser's drive current within its
+boot value +-60 (never past 230, never below 1). A channel change saves every parameter,
+and used to save the regulated currents too: over a few boots 89AE90F2's ratcheted down
+to ~1 and the base faulted as the rotors spun up (3 mW of 30). Now the boot currents are
+saved there (`laser_boot_currents_for_save`); a console `save` saves what is set.
+`params_load` repairs a saved current outside 80-230 from the factory partition (else
+190) and saves it. Below a boot current of 60 the lower limit went negative and a
+decrement wrapped 0 to 255 (#21): clamped at 1.

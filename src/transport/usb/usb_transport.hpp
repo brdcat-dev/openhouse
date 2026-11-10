@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "lh/input_sink.hpp"
+#include "radio_mode.hpp"
 #include "raw_capture.hpp"
 #include "report_parser.hpp"
 
@@ -110,6 +112,16 @@ class UsbTransport {
   // receiver is plugged in.
   bool SetPairing(const std::string& receiver, int milliseconds);
 
+  // The receiver with Bluetooth, for SteamVR's base station power management
+  // (radio_mode.hpp). Any thread. The two below wait for the HID threads to run the command
+  // (at most a couple of seconds, if the receiver goes away): not for tight loops.
+  bool HasBluetoothReceiver() const;
+  // Switches its radio; on: checks that it took, and goes back to Valve's mode if it didn't
+  // (stock 0x2cb80). False if there is no such receiver or it failed.
+  bool SetBluetoothRadio(bool on);
+  // Whether its radio is in Bluetooth mode; nullopt if there is none or it didn't answer.
+  std::optional<bool> BluetoothRadioOn();
+
   // Loads a cached SteamVR config for a serial ("LHR-0704E07A"), or "".
   static std::string LoadSteamConfig(const std::string& dir, const std::string& serial);
 
@@ -124,6 +136,7 @@ class UsbTransport {
     std::string receiver;  // dongle serial for wireless devices
     int sensorType = -1;   // hardware id low byte (report 0x05), -1 unknown
     std::string path;      // hidapi path, unique while plugged in
+    bool bluetooth = false;  // receiver's radio in Bluetooth mode: no device can connect
   };
   enum class OpenResult { Failed, Idle, Ready };
   // Opens and sets up one enumerated HID interface (Start and hotplug).
@@ -143,11 +156,11 @@ class UsbTransport {
   static bool QueryDeviceInfo(hid_device_* dev, DeviceInfo* info, int attempts = 20);
   static bool RequestProtocolVersion(hid_device_* dev, int version);
 
-  void Log(LogLevel level, const char* format, ...)
 #if defined(__GNUC__) || defined(__clang__)
-      __attribute__((format(printf, 3, 4)))
+  void Log(LogLevel level, const char* format, ...) __attribute__((format(printf, 3, 4)));
+#else
+  void Log(LogLevel level, const char* format, ...);
 #endif
-      ;
   IInputSink* sink_;
   UsbTransportOptions opts_;
   ReportDecoder decoder_;
@@ -182,6 +195,17 @@ class UsbTransport {
   std::vector<PairCommand> pairing_;  // under hapticMutex_; read by the reader and probe threads
   // Run a pending pairing command for `o`'s receiver; true if one was sent.
   bool TakePairing(Open& o);
+  // A radio command for the thread that owns the receiver. set: the mode to switch to, or
+  // nullopt to read it. result: the mode set or read, nullopt if that failed.
+  struct RadioCommand {
+    std::string receiver;
+    std::optional<RadioMode> set;
+    std::promise<std::optional<RadioMode>> result;
+  };
+  std::vector<std::shared_ptr<RadioCommand>> radioCommands_;  // under hapticMutex_
+  std::string BluetoothReceiver() const;
+  std::optional<RadioMode> RunRadioCommand(const std::string& receiver, std::optional<RadioMode> set);
+  void TakeRadioCommands(Open& o);  // runs the ones for `o`'s receiver, on its owner's thread
   // Configs read from the devices this session (serial -> JSON): a reconnect reuses it.
   std::mutex configMutex_;
   std::map<std::string, std::string> sessionConfigs_;

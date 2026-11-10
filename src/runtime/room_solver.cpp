@@ -426,10 +426,49 @@ RoomSolveOutput SolveRoom(const RoomSolveInput& in) {
     return std::make_pair(summary.IsSolutionUsable(), int(summary.iterations.size()));
   };
 
-  std::vector<char> use(kfs.size(), 1);
+  std::vector<char> use(kfs.size(), 1), excluded(kfs.size(), 0);
   std::vector<double> rms;
   auto [ok, iterations] = solve(use, &rms);
   if (!ok) { out.summary = "solve failed"; return out; }
+  // A device whose keyframes typically fit several times worse than every other device's
+  // is out of this solve: its own model or calibration is off, and its many keyframes,
+  // each under the per-keyframe limit below, dragged the room around (live: a headset
+  // 0.3-0.7 m / 5-14 deg off the room's base pairs moved locked bases 5-6 cm per solve).
+  {
+    std::map<std::string, std::vector<double>> perDevice;
+    for (size_t i = 0; i < kfs.size(); ++i)
+      if (rms[i] >= 0) perDevice[kfs[i].k->device].push_back(rms[i]);
+    std::map<std::string, double> medians;
+    for (auto& [device, v] : perDevice) {
+      if (v.size() < 10) continue;
+      std::sort(v.begin(), v.end());
+      medians[device] = v[v.size() / 2];
+    }
+    // Only a clearly broken device, one at a time, and never most of the window:
+    // controllers fit ~3x worse than trackers by nature (fast, grazing), and leaving them
+    // out at 3x cut a live solve from 395 keyframes to 87 and moved the room 35-41 mm.
+    if (medians.size() >= 3) {
+      std::string worst;
+      double worstRatio = 0;
+      for (const auto& [device, m] : medians) {
+        std::vector<double> others;
+        for (const auto& [d, o] : medians) if (d != device) others.push_back(o);
+        std::sort(others.begin(), others.end());
+        const double ratio = m / std::max(others[others.size() / 2], 1e-9);
+        if (m > 3e-4 && ratio > worstRatio) { worstRatio = ratio; worst = device; }
+      }
+      if (worstRatio > 8 && perDevice[worst].size() * 3 <= kfs.size()) {
+        out.excludedDevices.emplace_back(worst, worstRatio);
+        for (size_t i = 0; i < kfs.size(); ++i)
+          if (kfs[i].k->device == worst) { use[i] = 0; excluded[i] = 1; }
+      }
+      if (!out.excludedDevices.empty()) {
+        out.bases.clear();
+        std::tie(ok, iterations) = solve(use, &rms);
+        if (!ok) { out.summary = "solve failed after leaving a device out"; return out; }
+      }
+    }
+  }
   // Reject keyframes that do not fit (wrong pose, reflections), then solve again.
   std::vector<double> sorted;
   for (double r : rms) if (r >= 0) sorted.push_back(r);
@@ -438,11 +477,60 @@ RoomSolveOutput SolveRoom(const RoomSolveInput& in) {
   const double limit = std::max(4 * median, 5e-4);
   int rejected = 0;
   for (size_t i = 0; i < kfs.size(); ++i)
-    if (rms[i] > limit) { use[i] = 0; ++rejected; }
+    if (!excluded[i] && rms[i] > limit) { use[i] = 0; ++rejected; }
   if (rejected) {
     out.bases.clear();
     std::tie(ok, iterations) = solve(use, &rms);
     if (!ok) { out.summary = "solve failed after rejection"; return out; }
+  }
+  std::map<uint32_t, std::pair<int, int>> seenRejected;
+  std::map<uint32_t, std::map<std::string, int>> rejectedBy;  // base -> device -> rejected keyframes
+  for (size_t i = 0; i < kfs.size(); ++i) {
+    if (excluded[i]) continue;
+    for (const auto& [base, s] : kfs[i].k->samples) {
+      ++seenRejected[base].first;
+      if (!use[i]) { ++seenRejected[base].second; ++rejectedBy[base][kfs[i].k->device]; }
+    }
+  }
+  // Per device, its samples of a base at the solved pose against the room's pose: the
+  // devices that fit the solved one clearly better are the ones whose light says it moved.
+  auto deviceSupport = [&](uint32_t base, const Eigen::Isometry3d& known, int* checked, int* supporting) {
+    std::map<std::string, std::array<double, 3>> acc;  // device -> (sum at solved, sum at known, keyframes)
+    const auto& cal = in.calibration.at(base);
+    const auto bm = in.baseModels.find(base);
+    const int baseModel = bm == in.baseModels.end() ? 1 : bm->second;
+    Block knownBlock;
+    knownBlock.Set(known);
+    const double* solvedV = bases.at(base).v;
+    for (size_t i = 0; i < kfs.size(); ++i) {
+      if (!use[i]) continue;
+      const auto s = kfs[i].k->samples.find(base);
+      if (s == kfs[i].k->samples.end()) continue;
+      auto& a = acc[kfs[i].k->device];
+      a[2] += 1;
+      for (const auto& ks : s->second) {
+        if (ks.sample.axis < 0 || ks.sample.axis > 1) continue;
+        const AngleCost cost(AngleResidual{ks.point, Eigen::Vector3d::Zero(), ks.sample.axis, cal.data(), ks.sample.angle, baseModel});
+        double r = 0;
+        const double* p1[2] = {solvedV, kfs[i].pose.v};
+        cost.Evaluate(p1, &r, nullptr);
+        a[0] += std::min(r * r, kHuber * kHuber * 4);
+        const double* p2[2] = {knownBlock.v, kfs[i].pose.v};
+        cost.Evaluate(p2, &r, nullptr);
+        a[1] += std::min(r * r, kHuber * kHuber * 4);
+      }
+    }
+    for (const auto& [device, a] : acc) {
+      if (a[2] < 5) continue;
+      ++*checked;
+      if (a[1] > 1.5 * a[0]) ++*supporting;
+    }
+  };
+  // A base whose every keyframe was rejected is in no solve: reported at its room pose
+  // with no keyframes, so the caller still sees its rejections.
+  for (const auto& [base, sr] : seenRejected) {
+    const auto known = in.known.find(base);
+    if (sr.second > 0 && !out.bases.count(base) && known != in.known.end()) out.bases[base].worldFromBase = known->second;
   }
   // Per-base fit statistics.
   std::map<uint32_t, std::pair<double, int>> fit;
@@ -465,6 +553,11 @@ RoomSolveOutput SolveRoom(const RoomSolveInput& in) {
   int count = 0;
   for (auto& [base, sb] : out.bases) {
     sb.keyframes = fit[base].second;
+    sb.seen = seenRejected[base].first;
+    sb.rejected = seenRejected[base].second;
+    for (const auto& [device, n] : rejectedBy[base]) sb.rejectingDevices += n >= 5;
+    if (const auto known = in.known.find(base); known != in.known.end() && base != in.origin && in.calibration.count(base) && bases.count(base))
+      deviceSupport(base, known->second, &sb.checkedDevices, &sb.supportingDevices);
     sb.fresh = fresh[base];
     sb.devices = int(when[base].size());
     for (const auto& [device, range] : when[base]) sb.span = std::max(sb.span, range.second - range.first);

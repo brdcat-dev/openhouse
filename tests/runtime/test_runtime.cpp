@@ -283,7 +283,7 @@ TEST(RoomMap, LockedBaseMovesOnlyWhenBumped) {
   room.OnBaseSeen(Config(2), turned);
   room.OnBaseSeen(Config(2), turned);
   EXPECT_FALSE(RoomMap::Locked(*room.Base(2)));
-  room.ApplySolved(2, away, 1e-6, 1e-7, 20, 1e-4);
+  room.ApplySolved(2, away, 1e-6, 1e-7, 80, 1e-4);  // re-placed from enough keyframes (>= 40, 80 from one device)
   EXPECT_NEAR(room.Base(2)->worldFromBase.translation().x(), away.translation().x(), 1e-6);
 }
 

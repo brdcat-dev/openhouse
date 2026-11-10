@@ -202,6 +202,14 @@ not persistent disabling. HMDs and base stations do not advertise this capabilit
 Global provider standby is deliberately not wired to power off every device.
 Windows base-station power management keeps SteamVR's native UI/settings, uses PC
 Bluetooth batches when available, and retains the Index fallback; see `bluetooth.md`.
+Each `EnterStandby` and power-off result is logged at INFO (idle power-off was reported
+not to work; the path matches stock, cause unknown). Of the provider's standby calls
+only `LeaveStandby` reaches the stock driver (`StockHmd::LeaveStandby`): it powers the
+headset panels back on (#20, black display after standby); its `EnterStandby` would
+power off controllers it doesn't own. The stock driver's context gets an
+`IVRProperties` proxy that drops its writes of `Prop_CurrentUniverseId_Uint64` (#19:
+its unused tracker switched SteamVR to its own universe mid-session). The `capture`
+setting is read only under SteamVR (older Monado aborts on a missing key).
 Power requests take priority over pending vibration for that receiver.
 The packet is decompilation-backed (`0x3ce5a0`, `0x3ce6e0`); callback routing and
 packet bytes are tested, but actual power-down/reconnect needs a live-device check.
@@ -211,6 +219,23 @@ disappear, as requested. Newly observed bases continue through the existing room
 learning pipeline; this change does not expire or remove them.
 
 Windows build feasibility and missing cross-dependencies: `windows_build.md`.
+
+## Base station power
+
+vrmonitor wakes and sleeps the base stations over Bluetooth, through the serial port of
+a headset's built-in receiver, but first asks the headset's driver to switch that
+receiver's radio, with `IVRDebug::DriverDebugRequest(0, ...)`: `set_radio_mode_ble` /
+`set_radio_mode_valve` answer `1` or `0`, `get_radio_mode` answers `B`, `V` or `0`. A
+failed first switch makes vrmonitor give up for the whole session, so the stations
+neither wake when SteamVR starts nor sleep when it closes.
+
+In the hybrid setup these requests reach the stock driver through the headset's proxy
+(`stock_hmd.hpp`), and it can't serve them: it never sees the receivers. So
+`StockHmd::SetRequestHandler` lets ours answer first (`Provider::RadioRequest`, as stock
+`0x1eaa9` in the Windows DLL, 2.19.2); anything else still goes to the stock driver. The
+commands run on the thread that owns the receiver, like pairing
+(`UsbTransport::TakeRadioCommands`). Reports, and which receiver: `usb/radio_mode.hpp`.
+Checked on a Bigscreen Beyond's receivers.
 
 ## Tracking quality
 

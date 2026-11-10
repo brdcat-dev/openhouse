@@ -3,19 +3,28 @@
 Owner scope: Windows and SteamVR, Index headset, four LH2 stations. Overnight
 SteamVR restarts and station sleep/wake tests are authorized. The owner requested
 concurrent commands followed by verification, preferring PC Bluetooth when
-available and the default Index controller otherwise. Changes remain uncommitted.
+available and the default Index controller otherwise. The Bluetooth work is preserved in the upstream merge.
 
-**Latest checkpoint (21:14 AEDT): goal still active.** Index fallback has passed real
-four-station wake/sleep and metadata, with no retries/errors, shutdown 13.81s, and
-independent sleep readback 00 on all four. All Frida sessions are detached/closed.
-The older live-handle paragraph below is superseded. A standalone standby-to-sleep
-test exposed intermittent first-attempt Windows GATT failures after the three normal
-cycles passed. Source now uses explicit random BLE addressing, polls wake readiness
-before sleep from standby, and retries only failed writes up to three attempts
-within the existing shared budget. These latest changes need build/hardware proof
-and deployment; the installed bridge is still DD950F6B... from the earlier cycles.
-The last direct test left three stations in standby and one asleep; restore all to
-sleep before finishing. Do not mark the overall goal complete yet.
+**Latest checkpoint (21:43 AEDT): merged upstream b4070bc into the Windows Bluetooth branch.**
+Native MSVC Release build and all nine CTest suites pass, including six Bluetooth
+unit cases and the native installer's unknown-SDK preservation test. The merged
+native installer deployed both libraries successfully. Installed SHA256:
+
+* tracking driver (4,532,224 bytes): `A13386686C7B3D0FC91906DA828158E669DA36E4DBABC0A45BA607E66ECE3429`
+* Bluetooth bridge (580,608 bytes): `18721D371967F96A2ED5D290EB5789BD080AC595579658D1AD680B619B33CC21`
+
+SteamVR PID 2544 woke all four stations through one PC batch (3.218s); independent
+uncached reads confirmed all awake. All four metadata requests succeeded, including
+one automatic fallback to Index after a failed PC read. Normal shutdown confirmed
+all four asleep in one PC batch (2.804s; native shutdown 2.84s), without transport
+initialization retries, NRF timeouts, or a startup sleep command.
+
+A same-process standby-to-sleep test passed all four in both phases. A subsequent
+separate-process standby attempt failed all four PC writes within the budget.
+The intermittent Windows GATT issue therefore remains open; do not describe the
+broader Bluetooth reliability goal as complete. The earlier forced-Index test
+passed before the upstream merge; no forced-Index-only power test was repeated yet.
+No Frida instrumentation remains attached.
 
 ## Current implementation
 
@@ -150,25 +159,10 @@ three cycles. Its additional startup/shutdown passed with four PC confirmations 
 successful routine information queries; shutdown was 3.15s. Saved log:
 .cache/bt-final-build-pc-cycle.txt.
 
-Current tracking DLL SHA256:
+Pre-merge tracking DLL SHA256 (superseded by the checkpoint above):
 D6FD9E66444645D8A310CC2CB5A9BB9ECFC99608E79AC47D7F5ED0811B1D06F0.
-Current compiled bridge SHA256:
+Pre-merge bridge SHA256 (superseded by the checkpoint above):
 DD950F6BCA55C44BE99DAA2CE8EE48CA6131459359E67D0B3A46F780A83D4F7D.
-
-Index fallback verification is currently running in vrmonitor PID 13620, Frida
-session 0082368d-f283-4c03-a0f5-21c47b96d842. The diagnostic script
-build-bt-probe/force-no-pc.js makes only that process's BluetoothAdapter.GetDefaultAsync
-query fail. The real PC adapter and other applications are unchanged. This forces
-real Index station operations, not fake BLE results. The first RoGetActivationFactory
-fault alone was bypassed by activation caching and must NOT be counted as a fallback
-test. The current method hook has confirmed repeated unavailable-adapter queries.
-
-Live test harness: unified exec session 58906, running test-native-cycles.ps1 with
--ExistingProcessId 13620 -Backend Index -Cycles 1. It performs independent wake
-readbacks, waits until PC probe connections are observed disconnected, then tests
-Index shutdown/readback. Preserve the live handle; do not restart on an observation
-timeout. Final audit still needs this result, removal of instrumentation, installer
-negative checks with SteamVR closed, final state/hash checks, and documentation update.
 
 ## Build and regression checks
 
@@ -177,9 +171,9 @@ Ignored build-bt-probe/configure.cmd and build-project.cmd contain the exact loc
 commands. Native build command uses the pinned workspace vcpkg checkout, OpenVR
 headers under .cache/openvr, LH_BUILD_VIEWER=OFF and the absolute triplet overlay.
 
-All eight configured CTest suites pass after the bridge changes. Five additional
+All nine configured CTest suites pass after the upstream merge. Six additional
 Bluetooth checks live in the unit suite: managed selection, version parsing, reported
-mode decoding, concurrent writes before polling, and missing/delayed station state.
+mode decoding, concurrent writes before polling, missing/delayed station state, and failed-write retries.
 Real-DLL OpenVR tests still check station properties and normal tracking/replay.
 
 A complete release ZIP, a new MinGW cross-build, Linux hardware and LH1 hardware

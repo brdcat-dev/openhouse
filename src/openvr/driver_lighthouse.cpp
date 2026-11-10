@@ -176,13 +176,17 @@ uint64_t UniverseId(const std::string& roomId) {
 
 HmdQuaternion_t Quat(const std::array<double, 4>& q) { return {q[0], q[1], q[2], q[3]}; }
 
-// The render model name in a device's own config. Index controllers' firmware names
-// "{knuckles}valve_controller_knu_1_0_right", a resource root SteamVR no longer has (it
-// is "indexcontroller" now): SteamVR found no model and logged "Could not find named
-// path knuckles" every frame.
+// The render model name in a device's own config.
+// 1) Index controllers' firmware names "{knuckles}valve_controller_knu_1_0_right", a resource
+// root SteamVR no longer has (it is "indexcontroller" now): SteamVR found no model and logged
+// "Could not find named path knuckles" every frame.
+// 2) Vive Tracker 1.0/2.0 ("VIVE Tracker Pro MV") firmware reports "vr_tracker_vive_1_0" without
+// resource root. Without "{htc}", SteamVR attempts to load it from resources/rendermodels/
+// instead of drivers/htc/resources/rendermodels/, failing with VRRenderModelError_InvalidModel (301).
 std::string RenderModel(const std::string& configured) {
   static const std::string kOld = "{knuckles}";
   if (configured.rfind(kOld, 0) == 0) return "{indexcontroller}" + configured.substr(kOld.size());
+  if (configured == "vr_tracker_vive_1_0") return "{htc}vr_tracker_vive_1_0";
   return configured;
 }
 
@@ -233,8 +237,12 @@ class Device : public ITrackedDeviceServerDriver {
     externalAlive_ = alive;
     active_ = true;
   }
+  // SteamVR's idle power-off (power/turnOffControllersTimeout) calls this; the stock
+  // driver powers the device off here when it can (Prop_DeviceCanPowerOff), and so do we.
   void EnterStandby() override {
-    if (info_.role == lh::DeviceRole::Controller || info_.role == lh::DeviceRole::Tracker) powerOffRequested_ = true;
+    const bool canPowerOff = info_.role == lh::DeviceRole::Controller || info_.role == lh::DeviceRole::Tracker;
+    Log("SteamVR put " + info_.serial + " in standby" + (canPowerOff ? ": powering it off" : " (not a device we power off)"));
+    if (canPowerOff) powerOffRequested_ = true;
   }
   void* GetComponent(const char*) override { return nullptr; }
   void DebugRequest(const char*, char* response, uint32_t size) override {
@@ -775,8 +783,11 @@ class Provider : public IServerTrackedDeviceProvider {
     std::string captureDir;
     // Or "capture" in steamvr.vrsettings under driver_lighthouse (or driver_openhouse): on
     // Windows a new environment variable reaches SteamVR only after Steam restarts.
+    // SteamVR only: older Monado's steamvr_lh (Envision's) aborts on a GetString of a
+    // key missing from default.vrsettings, and Monado/WiVRn see LH_CAPTURE anyway.
     std::string captureSetting;
-    for (const char* section : {"driver_lighthouse", "driver_openhouse"}) {
+    const bool steamvr = HostName().rfind("vrserver", 0) == 0;
+    if (steamvr) for (const char* section : {"driver_lighthouse", "driver_openhouse"}) {
       char value[1024]{};
       VRSettings()->GetString(section, "capture", value, sizeof value);
       if (*value) { captureSetting = value; break; }
@@ -828,6 +839,13 @@ class Provider : public IServerTrackedDeviceProvider {
     // SteamVR's dongle pairing menu: ours owns the dongles (registered before the stock
     // driver loads, which is kept off this mailbox).
     if (options.replayPath.empty()) pairing_.Open(context_, [](const std::string& text) { Log(text); });
+    {
+      std::lock_guard lock(radioMutex_);
+      radioSession_ = session_.get();
+    }
+    stock_.SetRequestHandler([this](const char* request, char* response, uint32_t size) {
+      return RadioRequest(request, response, size);
+    });
     // A headset on USB: bring up the stock driver for its display now, inside the host's
     // device discovery window.
     using Presence = lh::openvr::StockHmd::Presence;
@@ -900,6 +918,10 @@ class Provider : public IServerTrackedDeviceProvider {
     if (thread_.joinable()) thread_.join();
     if (reportThread_.joinable()) reportThread_.join();  // a report being saved finishes first
     g_telemetry.Stop();
+    {
+      std::lock_guard lock(radioMutex_);  // waits for a request being answered
+      radioSession_ = nullptr;
+    }
     if (session_) session_->Stop();
     session_.reset();
     g_recorder.Close();
@@ -947,9 +969,16 @@ class Provider : public IServerTrackedDeviceProvider {
     return {};
   }
 
+  // Only leaving standby reaches the stock driver: it powers the headset's panels back up
+  // there (the headset's own EnterStandby, through DeviceProxy, turned them off). Without
+  // it a headset that went to sleep stayed dark (#20). Its provider EnterStandby isn't
+  // forwarded: it would power off controllers it doesn't own here.
   bool ShouldBlockStandbyMode() override { return false; }
-  void EnterStandby() override {}
-  void LeaveStandby() override {}
+  void EnterStandby() override { Log("SteamVR entering standby"); }
+  void LeaveStandby() override {
+    Log("SteamVR leaving standby");
+    stock_.LeaveStandby();
+  }
 
  private:
   void Main() {
@@ -1130,11 +1159,34 @@ class Provider : public IServerTrackedDeviceProvider {
       Log("registered " + info.serial);
   }
 
+  // SteamVR's base station power management asks the headset to switch the Bluetooth
+  // receiver's radio (usb/radio_mode.hpp). That receiver is ours, so ours answers, the way
+  // the stock driver does (0x1eaa9). False: there is none, and the stock driver says so.
+  bool RadioRequest(const char* request, char* response, uint32_t size) {
+    if (!request || !response || !size) return false;
+    const bool toBluetooth = !std::strcmp(request, "set_radio_mode_ble");
+    const bool toValve = !std::strcmp(request, "set_radio_mode_valve");
+    const bool read = !std::strcmp(request, "get_radio_mode");
+    if (!toBluetooth && !toValve && !read) return false;
+    std::lock_guard lock(radioMutex_);
+    if (!radioSession_ || !radioSession_->HasBluetoothRadio()) return false;
+    const char* answer = "0";
+    if (read) {
+      if (const auto on = radioSession_->BluetoothRadioOn()) answer = *on ? "B" : "V";
+    } else if (radioSession_->SetBluetoothRadio(toBluetooth)) {
+      answer = "1";
+    }
+    std::snprintf(response, size, "%s", answer);
+    return true;
+  }
+
   std::set<std::string> loggedHaptic_;
   std::atomic<bool> loggedUnrouted_{false};
   std::mutex eventMutex_;
   std::deque<VREvent_t> hapticEvents_;
   std::unique_ptr<lh::Session> session_;
+  std::mutex radioMutex_;
+  lh::Session* radioSession_ = nullptr;  // session_ while it can answer; under radioMutex_
   IVRDriverContext* context_ = nullptr;
   lh::openvr::StockHmd stock_;
   lh::openvr::PairingMailbox pairing_;

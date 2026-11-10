@@ -207,8 +207,26 @@ bool WirelessReportParser::DecodePacket(const uint8_t* pkt, int64_t* imuTicks) {
   // 0x3d18d0. Each radio slot is 29 bytes, including the two framing bytes.
   if (pkt[1] < 1 || pkt[1] > 27) return false;
   bool ok;
-  if (version_ == 0) ok = LegacyDecoder().Decode(pkt[0], pkt + 2, pkt[1], &pkt_);
-  else if (version_ == 1) ok = wv2_.Decode(pkt[0], pkt + 2, pkt[1], &pkt_);
+  if (version_ == 0) {
+    ok = LegacyDecoder().Decode(pkt[0], pkt + 2, pkt[1], &pkt_);
+    if (ok) {
+      probeDecoded_[0] = probeDecoded_[1] = 0;
+    } else {
+      // Its sub-protocols are announced only now and then, never in a short recording:
+      // each probe assumes one (LH2 light, LH1 light; controller 0 as live devices
+      // announce), and the one that keeps decoding while legacy fails is the device.
+      for (int k = 0; k < 2; ++k) {
+        WirelessPacket probed;
+        if (!probe_[k].Decode(pkt[0], pkt + 2, pkt[1], &probed)) { probeDecoded_[k] = 0; continue; }
+        if (++probeDecoded_[k] < 20) continue;  // ~0.1 s of a device's packets
+        version_ = 1;
+        wv2_ = probe_[k];
+        pkt_ = probed;
+        ok = true;
+        break;
+      }
+    }
+  } else if (version_ == 1) ok = wv2_.Decode(pkt[0], pkt + 2, pkt[1], &pkt_);
   else {
     // 0x3ccaf0: waiting for "len 3, 0xe2, version"
     if (pkt[1] == 3 && pkt[3] == 0xe2) {
