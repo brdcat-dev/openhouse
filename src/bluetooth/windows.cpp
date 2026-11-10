@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <cctype>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -22,14 +23,21 @@ using namespace winrt::Windows::Devices::Bluetooth;
 using namespace winrt::Windows::Devices::Bluetooth::GenericAttributeProfile;
 using namespace winrt::Windows::Devices::Bluetooth::Advertisement;
 
-template<class Operation> auto Await(Operation operation, Clock::time_point deadline) {
-  const auto remaining = std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(deadline - Clock::now());
-  if (remaining.count() <= 0 ||
-      operation.wait_for(remaining) != winrt::Windows::Foundation::AsyncStatus::Completed) {
-    operation.Cancel();
-    throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+template<class Operation> auto Await(Operation operation, Clock::time_point deadline,
+                                    const char* step = "Bluetooth operation") {
+  try {
+    const auto remaining = std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(deadline - Clock::now());
+    if (remaining.count() <= 0 ||
+        operation.wait_for(remaining) == winrt::Windows::Foundation::AsyncStatus::Started) {
+      operation.Cancel();
+      throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    }
+    return operation.GetResults();
+  } catch (const winrt::hresult_error& error) {
+    char code[16];
+    std::snprintf(code, sizeof code, "0x%08x", unsigned(error.code()));
+    throw std::runtime_error(std::string(step) + " " + code + ": " + winrt::to_string(error.message()));
   }
-  return operation.GetResults();
 }
 
 struct Connection {
@@ -48,24 +56,22 @@ struct Connection {
   }
 };
 
-std::unique_ptr<Connection> Connect(uint64_t address, Clock::time_point deadline,
-                                    winrt::guid serviceId, winrt::guid characteristicId) {
-  auto result = std::make_unique<Connection>();
-  result->device = Await(BluetoothLEDevice::FromBluetoothAddressAsync(address, BluetoothAddressType::Random), deadline);
-  if (!result->device) throw std::runtime_error("Bluetooth device unavailable");
-  const auto services = Await(result->device.GetGattServicesForUuidAsync(
-      serviceId, BluetoothCacheMode::Uncached), deadline);
+void Connect(Connection& result, uint64_t address, Clock::time_point deadline,
+             winrt::guid serviceId, winrt::guid characteristicId) {
+  result.device = Await(BluetoothLEDevice::FromBluetoothAddressAsync(address, BluetoothAddressType::Random), deadline, "Open device");
+  if (!result.device) throw std::runtime_error("Bluetooth device unavailable");
+  const auto services = Await(result.device.GetGattServicesForUuidAsync(
+      serviceId, BluetoothCacheMode::Uncached), deadline, "Discover services");
   if (services.Status() != GattCommunicationStatus::Success || services.Services().Size() != 1)
     throw std::runtime_error("Bluetooth service discovery status=" + std::to_string(int(services.Status())));
-  result->service = services.Services().GetAt(0);
-  result->session = result->service.Session();
-  result->session.MaintainConnection(true);
-  const auto characteristics = Await(result->service.GetCharacteristicsForUuidAsync(
-      characteristicId, BluetoothCacheMode::Uncached), deadline);
+  result.service = services.Services().GetAt(0);
+  result.session = result.service.Session();
+  result.session.MaintainConnection(true);
+  const auto characteristics = Await(result.service.GetCharacteristicsForUuidAsync(
+      characteristicId, BluetoothCacheMode::Uncached), deadline, "Discover characteristic");
   if (characteristics.Status() != GattCommunicationStatus::Success || characteristics.Characteristics().Size() != 1)
     throw std::runtime_error("Bluetooth characteristic discovery status=" + std::to_string(int(characteristics.Status())));
-  result->power = characteristics.Characteristics().GetAt(0);
-  return result;
+  result.power = characteristics.Characteristics().GetAt(0);
 }
 }  // namespace
 
@@ -80,8 +86,9 @@ bool PcAdapterAvailable() {
 
 DeviceInfo ReadDeviceInfo(uint64_t address, std::chrono::milliseconds timeout) {
   const auto deadline = Clock::now() + timeout;
-  auto connection = Connect(address, deadline, winrt::guid(L"0000180a-0000-1000-8000-00805f9b34fb"),
-                            winrt::guid(L"00002a26-0000-1000-8000-00805f9b34fb"));
+  auto connection = std::make_unique<Connection>();
+  Connect(*connection, address, deadline, winrt::guid(L"0000180a-0000-1000-8000-00805f9b34fb"),
+          winrt::guid(L"00002a26-0000-1000-8000-00805f9b34fb"));
   const auto read = [&](const GattCharacteristic& characteristic) {
     const auto result = Await(characteristic.ReadValueAsync(BluetoothCacheMode::Uncached), deadline);
     if (result.Status() != GattCommunicationStatus::Success || result.Value().Length() > 256)
@@ -157,29 +164,34 @@ std::vector<Station> Scan(std::chrono::milliseconds duration, std::span<const st
 std::vector<PowerResult> SetPowerBatch(std::span<const uint64_t> addresses, uint8_t mode,
                                       std::chrono::milliseconds timeout) {
   if (mode > 2 || addresses.size() > 32) throw std::invalid_argument("Invalid Bluetooth power batch");
-  std::map<uint64_t, std::unique_ptr<Connection>> connections;
+  std::map<uint64_t, std::vector<std::unique_ptr<Connection>>> connections;
   for (const auto address : addresses) {
-    if (!address || address >> 48 || !connections.emplace(address, nullptr).second) throw std::invalid_argument("Invalid Bluetooth address");
+    if (!address || address >> 48 || !connections.emplace(address, std::vector<std::unique_ptr<Connection>>{}).second)
+      throw std::invalid_argument("Invalid Bluetooth address");
   }
   const auto deadline = Clock::now() + timeout;
   auto states = SetPower(addresses, mode, deadline,
       [&](uint64_t address, uint8_t value, Clock::time_point limit) {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } apartment;
-        auto connection = Connect(address, limit, winrt::guid(L"00001523-1212-efde-1523-785feabcd124"),
-                                  winrt::guid(L"00001525-1212-efde-1523-785feabcd124"));
+        // Keep failed connections until verification finishes: Close can block in Windows.
+        auto& attempts = connections.at(address);
+        attempts.push_back(std::make_unique<Connection>());
+        auto& connection = attempts.back();
+        Connect(*connection, address, limit, winrt::guid(L"00001523-1212-efde-1523-785feabcd124"),
+                winrt::guid(L"00001525-1212-efde-1523-785feabcd124"));
         if (value == 0) {
-          const auto state = Await(connection->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit);
+          const auto state = Await(connection->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit, "Read current power");
           if (state.Status() == GattCommunicationStatus::Success && state.Value().Length() == 1 &&
               DecodePowerState(winrt::Windows::Storage::Streams::DataReader::FromBuffer(state.Value()).ReadByte()) == 2) {
             // The station firmware requires wake before switching from standby to sleep.
             winrt::Windows::Storage::Streams::DataWriter wake;
             wake.WriteByte(1);
-            if (Await(connection->power.WriteValueAsync(wake.DetachBuffer(), GattWriteOption::WriteWithResponse), limit) !=
+            if (Await(connection->power.WriteValueAsync(wake.DetachBuffer(), GattWriteOption::WriteWithResponse), limit, "Wake from standby") !=
                 GattCommunicationStatus::Success) return false;
             bool awake = false;
             while (Clock::now() < limit) {
-              const auto status = Await(connection->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit);
+              const auto status = Await(connection->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit, "Verify wake before sleep");
               if (status.Status() == GattCommunicationStatus::Success && status.Value().Length() == 1 &&
                   DecodePowerState(winrt::Windows::Storage::Streams::DataReader::FromBuffer(status.Value()).ReadByte()) == 1) {
                 awake = true;
@@ -192,23 +204,25 @@ std::vector<PowerResult> SetPowerBatch(std::span<const uint64_t> addresses, uint
         }
         winrt::Windows::Storage::Streams::DataWriter writer;
         writer.WriteByte(value);
-        const auto status = Await(connection->power.WriteValueAsync(writer.DetachBuffer(), GattWriteOption::WriteWithResponse), limit);
-        connections.at(address) = std::move(connection);
-        return status == GattCommunicationStatus::Success;
+        const auto status = Await(connection->power.WriteValueAsync(writer.DetachBuffer(), GattWriteOption::WriteWithResponse), limit, "Write power");
+        if (status != GattCommunicationStatus::Success)
+          throw std::runtime_error("Bluetooth power write status=" + std::to_string(int(status)));
+        return true;
       },
       [&](uint64_t address, Clock::time_point limit) {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } apartment;
-        const auto result = Await(connections.at(address)->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit);
-        if (result.Status() != GattCommunicationStatus::Success || result.Value().Length() != 1) return -1;
+        const auto result = Await(connections.at(address).back()->power.ReadValueAsync(BluetoothCacheMode::Uncached), limit, "Verify power");
+        if (result.Status() != GattCommunicationStatus::Success)
+          throw std::runtime_error("Bluetooth power read status=" + std::to_string(int(result.Status())));
+        if (result.Value().Length() != 1) throw std::runtime_error("Bluetooth power read has unexpected length");
         return int(winrt::Windows::Storage::Streams::DataReader::FromBuffer(result.Value()).ReadByte());
       });
   std::vector<std::future<void>> closing;
-  for (auto& [address, connection] : connections) {
-    if (!connection) continue;
-    closing.push_back(std::async(std::launch::async, [owned = std::move(connection)]() mutable {
+  for (auto& [address, attempts] : connections) {
+    closing.push_back(std::async(std::launch::async, [owned = std::move(attempts)]() mutable {
       winrt::init_apartment(winrt::apartment_type::multi_threaded);
-      owned.reset();
+      owned.clear();
       winrt::uninit_apartment();
     }));
   }

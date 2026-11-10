@@ -5,7 +5,40 @@ SteamVR restarts and station sleep/wake tests are authorized. The owner requeste
 concurrent commands followed by verification, preferring PC Bluetooth when
 available and the default Index controller otherwise. The Bluetooth work is preserved in the upstream merge.
 
-**Latest checkpoint (21:43 AEDT): merged upstream b4070bc into the Windows Bluetooth branch.**
+**Latest checkpoint (22:24 AEDT): partial fixes installed; standby reconnect remains open.**
+Follow-up source changes are uncommitted. The Windows await helper now preserves
+failed/cancelled operation HRESULTs rather than replacing every non-completion with
+a timeout. Error messages identify discovery, write and verification stages. Failed
+connection attempts are retained until verification finishes, so synchronous Windows
+cleanup cannot exhaust the responsive stations' verification window. Each retry still
+creates a fresh connection. Added Windows-only tests for success/error/expired awaits
+and invalid batch inputs; all ten CTest suites pass.
+
+Installed bridge SHA256: `6D0B45726DE6EEEF64261F9DCCFE8E1A012CD3C015828B36B28842E197FE0FF9`.
+Tracking DLL remains the merged A1338668... build below. Native SteamVR PID 27724
+passed four PC wake confirmations (3.328s), four metadata requests (one Index fallback),
+four PC sleep confirmations (2.708s), and independent uncached awake/asleep readbacks.
+Native shutdown completed in 2.75s, with no startup sleep, initialization retry or
+NRF timeout. SteamVR is closed and all four stations are asleep. Evidence:
+`.cache/diagnostic-fixes-native-cycle.txt` and `.cache/diagnostic-fixes-native-*`.
+
+The remaining reproduction is four stations put into standby (2), followed immediately
+by a separate process requesting wake (1) or sleep (0). Some service discoveries time
+out at the six-second write deadline; subsequent Close calls can block another 10-13s.
+Responsive stations now get verified despite that failure. A separate-process normal
+wake-to-sleep batch passed all four (2.608s/2.827s), as did one single-station
+standby-to-sleep test (2.329s/3.056s). These are observations, not proof of a root cause.
+
+Experiments with cached discovery, an earlier session/connection wait, a longer request
+budget, default address lookup, removing MaintainConnection, serial cleanup, a 100ms
+cleanup delay and two-at-a-time discovery did not fix the four-station standby case;
+all those production experiments were removed. Advertisements confirm random address
+type 1 for all four stations. An ETW BTHPORT trace could not start: Windows returned
+Access denied and requires administrator rights. No trace session or instrumentation
+was left running. The installed bridge retains Index fallback; do not mark the
+broader Bluetooth reliability goal complete.
+
+**Previous checkpoint (21:43 AEDT): merged upstream b4070bc into the Windows Bluetooth branch.**
 Native MSVC Release build and all nine CTest suites pass, including six Bluetooth
 unit cases and the native installer's unknown-SDK preservation test. The merged
 native installer deployed both libraries successfully. Installed SHA256:
